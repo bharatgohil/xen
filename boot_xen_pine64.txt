@@ -1,0 +1,41 @@
+ # SUNXI Xen Boot Script
+   
+   # Addresses suitable for 1GB system, adjust as appropriate for a 2GB system.
+   # Top of RAM:         0x80000000
+   # Xen relocate addr   0x7ee00000
+   setenv kernel_addr_r 0x7e400000 # 8M
+   # setenv ramdisk_addr_r 0x7e400000 # 8M
+   setenv fdt_addr 0x7e200000
+   setenv xen_addr_r 0x7e000000
+   
+   setenv fdt_high      0xffffffff # Load fdt in place instead of relocating
+   
+   # Load xen/xen to ${xen_addr_r}. e.g. tftp, fatload or ext2load to ${xen_addr_r}.
+   # see the following sections for details of booting from various devices.
+   fatload mmc 0:1 ${xen_addr_r} xen-pine64.uImage
+
+   setenv bootargs "dtuart=serial0 earlyprint loglvl=all conswitch=x dom0_mem=128M"
+   
+   # Load appropriate .dtb file to ${fdt_addr} e.g. tftp, fatload or ext2load to ${fdt_addr}.
+   # see the following sections for details of booting from various devices.
+   fatload mmc 0:1 ${fdt_addr} pine64.dtb   
+
+   fdt addr ${fdt_addr} 0x40000
+   
+   fdt resize
+   
+   fdt chosen
+   
+   fdt set /chosen \#address-cells <1>
+   fdt set /chosen \#size-cells <1>
+   
+   # Load Linux arch/arm/boot/zImage to ${kernel_addr_r}. e.g. tftp, fatload or ext2load to ${kernel_addr_r}.
+   # see the following sections for details of booting from various devices.
+   fatload mmc 0:1 ${kernel_addr_r} Image   
+
+   fdt mknod /chosen module@0
+   fdt set /chosen/module@0 compatible "xen,linux-zimage" "xen,multiboot-module"
+   fdt set /chosen/module@0 reg <${kernel_addr_r} 0x${filesize} >
+   fdt set /chosen/module@0 bootargs "console=hvc0 ro root=/dev/mmcblk0p2 clk_ignore_unused rootwait"
+   
+   bootm ${xen_addr_r} - ${fdt_addr}

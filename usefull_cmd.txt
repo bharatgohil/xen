@@ -1,0 +1,11 @@
+uboot-mkimage -A arm64 -C none -T kernel -a 0x41080000 -e 0x41080000 -n "XEN" -d xen/xen xen/xen-pine64.uImage
+
+mkimage -A arm -C none -T kernel -a 0x7fe00000 -e 0x7fe00000 -n "XEN" -d xen/xen xen/xen-pine64.uImage
+
+make dist-xen XEN_TARGET_ARCH=arm64 CONFIG_DEBUG=y debug=y CONFIG_EARLY_PRINTK=sun7i CROSS_COMPILE=aarch64-linux-gnu-
+
+export PATH=/media/harman/Oakland/bharat_bkp/embedded/tools/gcc-linaro-6.2.1-2016.11-x86_64_aarch64-linux-gnu/bin:$PATH
+
+export PATH=/media/harman/Oakland/bharat_bkp/embedded/tools/gcc-linaro-6.2.1-2016.11-x86_64_arm-linux-gnueabihf/bin:$PATH
+
+mkimage -A arm -T script -d xen.txt boot.scr
