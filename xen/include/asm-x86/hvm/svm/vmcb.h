@@ -31,7 +31,7 @@ enum GenericIntercept1bits
     GENERAL1_INTERCEPT_SMI           = 1 << 2,
     GENERAL1_INTERCEPT_INIT          = 1 << 3,
     GENERAL1_INTERCEPT_VINTR         = 1 << 4,
-    GENERAL1_INTERCEPT_CR0_SEL_WRITE = 1 << 5, 
+    GENERAL1_INTERCEPT_CR0_SEL_WRITE = 1 << 5,
     GENERAL1_INTERCEPT_IDTR_READ     = 1 << 6,
     GENERAL1_INTERCEPT_GDTR_READ     = 1 << 7,
     GENERAL1_INTERCEPT_LDTR_READ     = 1 << 8,
@@ -244,12 +244,12 @@ enum VMEXIT_EXITCODE
     VMEXIT_EXCEPTION_NP  =  75, /* 0x4b, segment-not-present */
     VMEXIT_EXCEPTION_SS  =  76, /* 0x4c, stack */
     VMEXIT_EXCEPTION_GP  =  77, /* 0x4d, general-protection */
-    VMEXIT_EXCEPTION_PF  =  78, /* 0x4f, page-fault */
-    VMEXIT_EXCEPTION_15  =  79, /* 0x50, reserved */
-    VMEXIT_EXCEPTION_MF  =  80, /* 0x51, x87 floating-point exception-pending */
-    VMEXIT_EXCEPTION_AC  =  81, /* 0x52, alignment-check */
-    VMEXIT_EXCEPTION_MC  =  82, /* 0x53, machine-check */
-    VMEXIT_EXCEPTION_XF  =  83, /* 0x54, simd floating-point */
+    VMEXIT_EXCEPTION_PF  =  78, /* 0x4e, page-fault */
+    VMEXIT_EXCEPTION_15  =  79, /* 0x4f, reserved */
+    VMEXIT_EXCEPTION_MF  =  80, /* 0x50, x87 floating-point exception-pending */
+    VMEXIT_EXCEPTION_AC  =  81, /* 0x51, alignment-check */
+    VMEXIT_EXCEPTION_MC  =  82, /* 0x52, machine-check */
+    VMEXIT_EXCEPTION_XF  =  83, /* 0x53, simd floating-point */
 
     /* exceptions 20-31 (exitcodes 84-95) are reserved */
 
@@ -304,13 +304,10 @@ enum VMEXIT_EXITCODE
     VMEXIT_INVALID          =  -1
 };
 
-/* Definition of segment state is borrowed by the generic HVM code. */
-typedef struct segment_register svm_segment_register_t;
-
 typedef union
 {
     u64 bytes;
-    struct 
+    struct
     {
         u64 vector:    8;
         u64 type:      3;
@@ -324,7 +321,7 @@ typedef union
 typedef union
 {
     u64 bytes;
-    struct 
+    struct
     {
         u64 tpr:          8;
         u64 irq:          1;
@@ -342,7 +339,7 @@ typedef union
 typedef union
 {
     u64 bytes;
-    struct 
+    struct
     {
         u64 type: 1;
         u64 rsv0: 1;
@@ -438,23 +435,28 @@ struct vmcb_struct {
     u8  guest_ins[15];          /* offset 0xD1 */
     u64 res10a[100];            /* offset 0xE0 pad to save area */
 
-    svm_segment_register_t es;  /* offset 1024 - cleanbit 8 */
-    svm_segment_register_t cs;  /* cleanbit 8 */
-    svm_segment_register_t ss;  /* cleanbit 8 */
-    svm_segment_register_t ds;  /* cleanbit 8 */
-    svm_segment_register_t fs;
-    svm_segment_register_t gs;
-    svm_segment_register_t gdtr; /* cleanbit 7 */
-    svm_segment_register_t ldtr;
-    svm_segment_register_t idtr; /* cleanbit 7 */
-    svm_segment_register_t tr;
+    union {
+        struct segment_register sreg[6];
+        struct {
+            struct segment_register es;  /* offset 0x400 - cleanbit 8 */
+            struct segment_register cs;  /* cleanbit 8 */
+            struct segment_register ss;  /* cleanbit 8 */
+            struct segment_register ds;  /* cleanbit 8 */
+            struct segment_register fs;
+            struct segment_register gs;
+        };
+    };
+    struct segment_register gdtr; /* cleanbit 7 */
+    struct segment_register ldtr;
+    struct segment_register idtr; /* cleanbit 7 */
+    struct segment_register tr;
     u64 res10[5];
     u8 res11[3];
     u8 _cpl;                    /* cleanbit 8 */
     u32 res12;
-    u64 _efer;                  /* offset 1024 + 0xD0  - cleanbit 5 */
+    u64 _efer;                  /* offset 0x400 + 0xD0 - cleanbit 5 */
     u64 res13[14];
-    u64 _cr4;                   /* offset 1024 + 0x148 - cleanbit 5 */
+    u64 _cr4;                   /* offset 0x400 + 0x148 - cleanbit 5 */
     u64 _cr3;                   /* cleanbit 5 */
     u64 _cr0;                   /* cleanbit 5 */
     u64 _dr7;                   /* cleanbit 6 */
@@ -508,7 +510,7 @@ struct arch_svm_struct {
     uint64_t guest_sysenter_cs;
     uint64_t guest_sysenter_esp;
     uint64_t guest_sysenter_eip;
-    
+
     /* AMD lightweight profiling MSR */
     uint64_t guest_lwp_cfg;      /* guest version */
     uint64_t cpu_lwp_cfg;        /* CPU version */
@@ -524,7 +526,6 @@ struct arch_svm_struct {
 };
 
 struct vmcb_struct *alloc_vmcb(void);
-struct host_save_area *alloc_host_save_area(void);
 void free_vmcb(struct vmcb_struct *vmcb);
 
 int  svm_create_vmcb(struct vcpu *v);
@@ -544,51 +545,47 @@ void svm_intercept_msr(struct vcpu *v, uint32_t msr, int enable);
  * VMCB accessor functions.
  */
 
-#define VMCB_ACCESSORS(_type, _name, _cleanbit)                             \
-static inline void vmcb_set_##_name(struct vmcb_struct *vmcb, _type value)  \
-{                                                                           \
-    vmcb->_##_name = value;                                                 \
-    vmcb->cleanbits.fields._cleanbit = 0;                                   \
-}                                                                           \
-static inline _type vmcb_get_##_name(const struct vmcb_struct *vmcb)        \
-{                                                                           \
-    return vmcb->_##_name;                                                  \
+#define VMCB_ACCESSORS(name, cleanbit)            \
+static inline void                                \
+vmcb_set_ ## name(struct vmcb_struct *vmcb,       \
+                  typeof(vmcb->_ ## name) value)  \
+{                                                 \
+    vmcb->_ ## name = value;                      \
+    vmcb->cleanbits.fields.cleanbit = 0;          \
+}                                                 \
+static inline typeof(alloc_vmcb()->_ ## name)     \
+vmcb_get_ ## name(const struct vmcb_struct *vmcb) \
+{                                                 \
+    return vmcb->_ ## name;                       \
 }
 
-VMCB_ACCESSORS(u32, cr_intercepts, intercepts)
-VMCB_ACCESSORS(u32, dr_intercepts, intercepts)
-VMCB_ACCESSORS(u32, exception_intercepts, intercepts)
-VMCB_ACCESSORS(u32, general1_intercepts, intercepts)
-VMCB_ACCESSORS(u32, general2_intercepts, intercepts)
-VMCB_ACCESSORS(u16, pause_filter_count, intercepts)
-VMCB_ACCESSORS(u64, tsc_offset, intercepts)
-VMCB_ACCESSORS(u64, iopm_base_pa, iopm)
-VMCB_ACCESSORS(u64, msrpm_base_pa, iopm)
-VMCB_ACCESSORS(u32, guest_asid, asid)
-VMCB_ACCESSORS(vintr_t, vintr, tpr)
-VMCB_ACCESSORS(u64, np_enable, np)
-VMCB_ACCESSORS(u64, h_cr3, np)
-VMCB_ACCESSORS(u64, g_pat, np)
-VMCB_ACCESSORS(u64, cr0, cr)
-VMCB_ACCESSORS(u64, cr3, cr)
-VMCB_ACCESSORS(u64, cr4, cr)
-VMCB_ACCESSORS(u64, efer, cr)
-VMCB_ACCESSORS(u64, dr6, dr)
-VMCB_ACCESSORS(u64, dr7, dr)
-/* Updates are all via hvm_set_segment_register(). */
-/* VMCB_ACCESSORS(svm_segment_register_t, gdtr, dt) */
-/* VMCB_ACCESSORS(svm_segment_register_t, idtr, dt) */
-/* VMCB_ACCESSORS(svm_segment_register_t, cs, seg) */
-/* VMCB_ACCESSORS(svm_segment_register_t, ds, seg) */
-/* VMCB_ACCESSORS(svm_segment_register_t, es, seg) */
-/* VMCB_ACCESSORS(svm_segment_register_t, ss, seg) */
-VMCB_ACCESSORS(u8, cpl, seg)
-VMCB_ACCESSORS(u64, cr2, cr2)
-VMCB_ACCESSORS(u64, debugctlmsr, lbr)
-VMCB_ACCESSORS(u64, lastbranchfromip, lbr)
-VMCB_ACCESSORS(u64, lastbranchtoip, lbr)
-VMCB_ACCESSORS(u64, lastintfromip, lbr)
-VMCB_ACCESSORS(u64, lastinttoip, lbr)
+VMCB_ACCESSORS(cr_intercepts, intercepts)
+VMCB_ACCESSORS(dr_intercepts, intercepts)
+VMCB_ACCESSORS(exception_intercepts, intercepts)
+VMCB_ACCESSORS(general1_intercepts, intercepts)
+VMCB_ACCESSORS(general2_intercepts, intercepts)
+VMCB_ACCESSORS(pause_filter_count, intercepts)
+VMCB_ACCESSORS(tsc_offset, intercepts)
+VMCB_ACCESSORS(iopm_base_pa, iopm)
+VMCB_ACCESSORS(msrpm_base_pa, iopm)
+VMCB_ACCESSORS(guest_asid, asid)
+VMCB_ACCESSORS(vintr, tpr)
+VMCB_ACCESSORS(np_enable, np)
+VMCB_ACCESSORS(h_cr3, np)
+VMCB_ACCESSORS(g_pat, np)
+VMCB_ACCESSORS(cr0, cr)
+VMCB_ACCESSORS(cr3, cr)
+VMCB_ACCESSORS(cr4, cr)
+VMCB_ACCESSORS(efer, cr)
+VMCB_ACCESSORS(dr6, dr)
+VMCB_ACCESSORS(dr7, dr)
+VMCB_ACCESSORS(cpl, seg)
+VMCB_ACCESSORS(cr2, cr2)
+VMCB_ACCESSORS(debugctlmsr, lbr)
+VMCB_ACCESSORS(lastbranchfromip, lbr)
+VMCB_ACCESSORS(lastbranchtoip, lbr)
+VMCB_ACCESSORS(lastintfromip, lbr)
+VMCB_ACCESSORS(lastinttoip, lbr)
 
 #undef VMCB_ACCESSORS
 

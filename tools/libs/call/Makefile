@@ -7,7 +7,7 @@ SHLIB_LDFLAGS += -Wl,--version-script=libxencall.map
 
 CFLAGS   += -Werror -Wmissing-prototypes
 CFLAGS   += -I./include $(CFLAGS_xeninclude)
-CFLAGS   += $(CFLAGS_libxentoollog)
+CFLAGS   += $(CFLAGS_libxentoollog) $(CFLAGS_libxentoolcore)
 
 SRCS-y                 += core.c buffer.c
 SRCS-$(CONFIG_Linux)   += linux.c
@@ -62,7 +62,7 @@ libxencall.so.$(MAJOR): libxencall.so.$(MAJOR).$(MINOR)
 	$(SYMLINK_SHLIB) $< $@
 
 libxencall.so.$(MAJOR).$(MINOR): $(PIC_OBJS) libxencall.map
-	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxencall.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxencall.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxentoolcore) $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: build
@@ -75,13 +75,22 @@ install: build
 	$(INSTALL_DATA) include/xencall.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xencall.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xencall.pc
+	rm -f $(DESTDIR)$(includedir)/xencall.h
+	rm -f $(DESTDIR)$(libdir)/libxencall.so
+	rm -f $(DESTDIR)$(libdir)/libxencall.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxencall.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxencall.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxencall.so.$(MAJOR).$(MINOR) libxencall.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xencall.pc

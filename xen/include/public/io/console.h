@@ -38,6 +38,11 @@ struct xencons_interface {
     XENCONS_RING_IDX out_cons, out_prod;
 };
 
+#ifdef XEN_WANT_FLEX_CONSOLE_RING
+#include "ring.h"
+DEFINE_XEN_FLEX_RING(xencons);
+#endif
+
 #endif /* __XEN_PUBLIC_IO_CONSOLE_H__ */
 
 /*

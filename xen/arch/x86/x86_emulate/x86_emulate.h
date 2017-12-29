@@ -60,27 +60,6 @@ static inline bool is_x86_system_segment(enum x86_segment seg)
     return seg >= x86_seg_tr && seg < x86_seg_none;
 }
 
-/* Classification of the types of software generated interrupts/exceptions. */
-enum x86_swint_type {
-    x86_swint_icebp, /* 0xf1 */
-    x86_swint_int3,  /* 0xcc */
-    x86_swint_into,  /* 0xce */
-    x86_swint_int,   /* 0xcd $n */
-};
-
-/*
- * How much help is required with software event injection?
- *
- * All software events return from x86_emulate() with X86EMUL_EXCEPTION and
- * fault-like semantics.  This just controls whether the emulator performs
- * presence/dpl/etc checks and possibly raises exceptions instead.
- */
-enum x86_swint_emulation {
-    x86_swint_emulate_none, /* Hardware supports all software injection properly */
-    x86_swint_emulate_icebp,/* Help needed with `icebp` (0xf1) */
-    x86_swint_emulate_all,  /* Help needed with all software events */
-};
-
 /*
  * x86 event types. This enumeration is valid for:
  *  Intel VMX: {VM_ENTRY,VM_EXIT,IDT_VECTORING}_INTR_INFO[10:8]
@@ -104,33 +83,26 @@ struct x86_event {
     unsigned long cr2;          /* Only for TRAP_page_fault h/w exception */
 };
 
-/* 
- * Attribute for segment selector. This is a copy of bit 40:47 & 52:55 of the
- * segment descriptor. It happens to match the format of an AMD SVM VMCB.
- */
-typedef union segment_attributes {
-    uint16_t bytes;
-    struct
-    {
-        uint16_t type:4;    /* 0;  Bit 40-43 */
-        uint16_t s:   1;    /* 4;  Bit 44 */
-        uint16_t dpl: 2;    /* 5;  Bit 45-46 */
-        uint16_t p:   1;    /* 7;  Bit 47 */
-        uint16_t avl: 1;    /* 8;  Bit 52 */
-        uint16_t l:   1;    /* 9;  Bit 53 */
-        uint16_t db:  1;    /* 10; Bit 54 */
-        uint16_t g:   1;    /* 11; Bit 55 */
-        uint16_t pad: 4;
-    } fields;
-} segment_attributes_t;
-
 /*
  * Full state of a segment register (visible and hidden portions).
- * Again, this happens to match the format of an AMD SVM VMCB.
+ * Chosen to match the format of an AMD SVM VMCB.
  */
 struct segment_register {
     uint16_t   sel;
-    segment_attributes_t attr;
+    union {
+        uint16_t attr;
+        struct {
+            uint16_t type:4;
+            uint16_t s:   1;
+            uint16_t dpl: 2;
+            uint16_t p:   1;
+            uint16_t avl: 1;
+            uint16_t l:   1;
+            uint16_t db:  1;
+            uint16_t g:   1;
+            uint16_t pad: 4;
+        };
+    };
     uint32_t   limit;
     uint64_t   base;
 };
@@ -161,6 +133,23 @@ struct x86_emul_fpu_aux {
   * Undefined behavior when used anywhere else.
   */
 #define X86EMUL_DONE           4
+ /*
+  * Current instruction is not implemented by the emulator.
+  * This value should only be returned by the core emulator when a valid
+  * opcode is found but the execution logic for that instruction is missing.
+  * It should NOT be returned by any of the x86_emulate_ops callbacks.
+  */
+#define X86EMUL_UNIMPLEMENTED  5
+ /*
+  * The current instruction's opcode is not valid.
+  * If this error code is returned by a function, an #UD trap should be
+  * raised by the final consumer of it.
+  *
+  * TODO: For the moment X86EMUL_UNRECOGNIZED and X86EMUL_UNIMPLEMENTED
+  * can be used interchangeably therefore raising an #UD trap is not
+  * strictly expected for now.
+ */
+#define X86EMUL_UNRECOGNIZED   X86EMUL_UNIMPLEMENTED
 
 /* FPU sub-types which may be requested via ->get_fpu(). */
 enum x86_emulate_fpu_type {
@@ -472,9 +461,6 @@ struct x86_emulate_ctxt
      * Input-only state:
      */
 
-    /* Software event injection support. */
-    enum x86_swint_emulation swint_emulate;
-
     /* CPU vendor (X86_VENDOR_UNKNOWN for "don't care") */
     unsigned char vendor;
 
@@ -497,6 +483,9 @@ struct x86_emulate_ctxt
     /* Stack pointer width in bits (16, 32 or 64). */
     unsigned int sp_size;
 
+    /* Long mode active? */
+    bool lma;
+
     /*
      * Output-only state:
      */
@@ -511,6 +500,7 @@ struct x86_emulate_ctxt
             bool hlt:1;          /* Instruction HLTed. */
             bool mov_ss:1;       /* Instruction sets MOV-SS irq shadow. */
             bool sti:1;          /* Instruction sets STI irq shadow. */
+            bool unblock_nmi:1;  /* Instruction clears NMI blocking. */
             bool singlestep:1;   /* Singlestepping was active. */
         };
     } retire;
@@ -695,35 +685,6 @@ static inline void x86_emul_pagefault(
     ctxt->event.type = X86_EVENTTYPE_HW_EXCEPTION;
     ctxt->event.error_code = error_code;
     ctxt->event.cr2 = cr2;
-
-    ctxt->event_pending = true;
-}
-
-static inline void x86_emul_software_event(
-    enum x86_swint_type type, uint8_t vector, uint8_t insn_len,
-    struct x86_emulate_ctxt *ctxt)
-{
-    ASSERT(!ctxt->event_pending);
-
-    switch ( type )
-    {
-    case x86_swint_icebp:
-        ctxt->event.type = X86_EVENTTYPE_PRI_SW_EXCEPTION;
-        break;
-
-    case x86_swint_int3:
-    case x86_swint_into:
-        ctxt->event.type = X86_EVENTTYPE_SW_EXCEPTION;
-        break;
-
-    case x86_swint_int:
-        ctxt->event.type = X86_EVENTTYPE_SW_INTERRUPT;
-        break;
-    }
-
-    ctxt->event.vector = vector;
-    ctxt->event.error_code = X86_EVENT_NO_EC;
-    ctxt->event.insn_len = insn_len;
 
     ctxt->event_pending = true;
 }

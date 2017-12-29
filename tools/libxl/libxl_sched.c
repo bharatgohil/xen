@@ -178,6 +178,20 @@ static int sched_arinc653_domain_set(libxl__gc *gc, uint32_t domid,
     return 0;
 }
 
+static int sched_null_domain_set(libxl__gc *gc, uint32_t domid,
+                                 const libxl_domain_sched_params *scinfo)
+{
+    /* There aren't any domain-specific parameters to be set. */
+    return 0;
+}
+
+static int sched_null_domain_get(libxl__gc *gc, uint32_t domid,
+                                 libxl_domain_sched_params *scinfo)
+{
+    /* There aren't any domain-specific parameters to return. */
+    return 0;
+}
+
 static int sched_credit_domain_get(libxl__gc *gc, uint32_t domid,
                                    libxl_domain_sched_params *scinfo)
 {
@@ -391,6 +405,7 @@ static int sched_credit2_domain_get(libxl__gc *gc, uint32_t domid,
     libxl_domain_sched_params_init(scinfo);
     scinfo->sched = LIBXL_SCHEDULER_CREDIT2;
     scinfo->weight = sdom.weight;
+    scinfo->cap = sdom.cap;
 
     return 0;
 }
@@ -399,7 +414,16 @@ static int sched_credit2_domain_set(libxl__gc *gc, uint32_t domid,
                                     const libxl_domain_sched_params *scinfo)
 {
     struct xen_domctl_sched_credit2 sdom;
+    xc_domaininfo_t info;
     int rc;
+
+    rc = xc_domain_getinfolist(CTX->xch, domid, 1, &info);
+    if (rc < 0) {
+        LOGED(ERROR, domid, "Getting domain info");
+        return ERROR_FAIL;
+    }
+    if (rc != 1 || info.domain != domid)
+        return ERROR_INVAL;
 
     rc = xc_sched_credit2_domain_get(CTX->xch, domid, &sdom);
     if (rc != 0) {
@@ -414,6 +438,17 @@ static int sched_credit2_domain_set(libxl__gc *gc, uint32_t domid,
             return ERROR_INVAL;
         }
         sdom.weight = scinfo->weight;
+    }
+
+    if (scinfo->cap != LIBXL_DOMAIN_SCHED_PARAM_CAP_DEFAULT) {
+        if (scinfo->cap < 0
+            || scinfo->cap > (info.max_vcpu_id + 1) * 100) {
+            LOGD(ERROR, domid, "Cpu cap out of range, "
+                 "valid range is from 0 to %d for specified number of vcpus",
+                 ((info.max_vcpu_id + 1) * 100));
+            return ERROR_INVAL;
+        }
+        sdom.cap = scinfo->cap;
     }
 
     rc = xc_sched_credit2_domain_set(CTX->xch, domid, &sdom);
@@ -497,6 +532,8 @@ static int sched_rtds_vcpu_get(libxl__gc *gc, uint32_t domid,
     for (i = 0; i < num_vcpus; i++) {
         scinfo->vcpus[i].period = vcpus[i].u.rtds.period;
         scinfo->vcpus[i].budget = vcpus[i].u.rtds.budget;
+        scinfo->vcpus[i].extratime =
+                !!(vcpus[i].u.rtds.flags & XEN_DOMCTL_SCHEDRT_extra);
         scinfo->vcpus[i].vcpuid = vcpus[i].vcpuid;
     }
     rc = 0;
@@ -544,6 +581,8 @@ static int sched_rtds_vcpu_get_all(libxl__gc *gc, uint32_t domid,
     for (i = 0; i < num_vcpus; i++) {
         scinfo->vcpus[i].period = vcpus[i].u.rtds.period;
         scinfo->vcpus[i].budget = vcpus[i].u.rtds.budget;
+        scinfo->vcpus[i].extratime =
+                !!(vcpus[i].u.rtds.flags & XEN_DOMCTL_SCHEDRT_extra);
         scinfo->vcpus[i].vcpuid = vcpus[i].vcpuid;
     }
     rc = 0;
@@ -593,6 +632,10 @@ static int sched_rtds_vcpu_set(libxl__gc *gc, uint32_t domid,
         vcpus[i].vcpuid = scinfo->vcpus[i].vcpuid;
         vcpus[i].u.rtds.period = scinfo->vcpus[i].period;
         vcpus[i].u.rtds.budget = scinfo->vcpus[i].budget;
+        if (scinfo->vcpus[i].extratime)
+            vcpus[i].u.rtds.flags |= XEN_DOMCTL_SCHEDRT_extra;
+        else
+            vcpus[i].u.rtds.flags &= ~XEN_DOMCTL_SCHEDRT_extra;
     }
 
     r = xc_sched_rtds_vcpu_set(CTX->xch, domid,
@@ -641,6 +684,10 @@ static int sched_rtds_vcpu_set_all(libxl__gc *gc, uint32_t domid,
         vcpus[i].vcpuid = i;
         vcpus[i].u.rtds.period = scinfo->vcpus[0].period;
         vcpus[i].u.rtds.budget = scinfo->vcpus[0].budget;
+        if (scinfo->vcpus[0].extratime)
+            vcpus[i].u.rtds.flags |= XEN_DOMCTL_SCHEDRT_extra;
+        else
+            vcpus[i].u.rtds.flags &= ~XEN_DOMCTL_SCHEDRT_extra;
     }
 
     r = xc_sched_rtds_vcpu_set(CTX->xch, domid,
@@ -691,6 +738,11 @@ static int sched_rtds_domain_set(libxl__gc *gc, uint32_t domid,
         sdom.period = scinfo->period;
     if (scinfo->budget != LIBXL_DOMAIN_SCHED_PARAM_BUDGET_DEFAULT)
         sdom.budget = scinfo->budget;
+    /* Set extratime by default */
+    if (scinfo->extratime)
+        sdom.flags |= XEN_DOMCTL_SCHEDRT_extra;
+    else
+        sdom.flags &= ~XEN_DOMCTL_SCHEDRT_extra;
     if (sched_rtds_validate_params(gc, sdom.period, sdom.budget))
         return ERROR_INVAL;
 
@@ -730,6 +782,9 @@ int libxl_domain_sched_params_set(libxl_ctx *ctx, uint32_t domid,
     case LIBXL_SCHEDULER_RTDS:
         ret=sched_rtds_domain_set(gc, domid, scinfo);
         break;
+    case LIBXL_SCHEDULER_NULL:
+        ret=sched_null_domain_set(gc, domid, scinfo);
+        break;
     default:
         LOGD(ERROR, domid, "Unknown scheduler");
         ret=ERROR_INVAL;
@@ -758,6 +813,7 @@ int libxl_vcpu_sched_params_set(libxl_ctx *ctx, uint32_t domid,
     case LIBXL_SCHEDULER_CREDIT:
     case LIBXL_SCHEDULER_CREDIT2:
     case LIBXL_SCHEDULER_ARINC653:
+    case LIBXL_SCHEDULER_NULL:
         LOGD(ERROR, domid, "per-VCPU parameter setting not supported for this scheduler");
         rc = ERROR_INVAL;
         break;
@@ -792,6 +848,7 @@ int libxl_vcpu_sched_params_set_all(libxl_ctx *ctx, uint32_t domid,
     case LIBXL_SCHEDULER_CREDIT:
     case LIBXL_SCHEDULER_CREDIT2:
     case LIBXL_SCHEDULER_ARINC653:
+    case LIBXL_SCHEDULER_NULL:
         LOGD(ERROR, domid, "per-VCPU parameter setting not supported for this scheduler");
         rc = ERROR_INVAL;
         break;
@@ -832,6 +889,9 @@ int libxl_domain_sched_params_get(libxl_ctx *ctx, uint32_t domid,
     case LIBXL_SCHEDULER_RTDS:
         ret=sched_rtds_domain_get(gc, domid, scinfo);
         break;
+    case LIBXL_SCHEDULER_NULL:
+        ret=sched_null_domain_get(gc, domid, scinfo);
+        break;
     default:
         LOGD(ERROR, domid, "Unknown scheduler");
         ret=ERROR_INVAL;
@@ -858,6 +918,7 @@ int libxl_vcpu_sched_params_get(libxl_ctx *ctx, uint32_t domid,
     case LIBXL_SCHEDULER_CREDIT:
     case LIBXL_SCHEDULER_CREDIT2:
     case LIBXL_SCHEDULER_ARINC653:
+    case LIBXL_SCHEDULER_NULL:
         LOGD(ERROR, domid, "per-VCPU parameter getting not supported for this scheduler");
         rc = ERROR_INVAL;
         break;
@@ -890,6 +951,7 @@ int libxl_vcpu_sched_params_get_all(libxl_ctx *ctx, uint32_t domid,
     case LIBXL_SCHEDULER_CREDIT:
     case LIBXL_SCHEDULER_CREDIT2:
     case LIBXL_SCHEDULER_ARINC653:
+    case LIBXL_SCHEDULER_NULL:
         LOGD(ERROR, domid, "per-VCPU parameter getting not supported for this scheduler");
         rc = ERROR_INVAL;
         break;

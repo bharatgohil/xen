@@ -75,6 +75,7 @@ libxl_domain_type = Enumeration("domain_type", [
     (-1, "INVALID"),
     (1, "HVM"),
     (2, "PV"),
+    (3, "PVH"),
     ], init_val = "LIBXL_DOMAIN_TYPE_INVALID")
 
 libxl_rdm_reserve_strategy = Enumeration("rdm_reserve_strategy", [
@@ -98,13 +99,13 @@ libxl_device_model_version = Enumeration("device_model_version", [
     (0, "UNKNOWN"),
     (1, "QEMU_XEN_TRADITIONAL"), # Historical qemu-xen device model (qemu-dm)
     (2, "QEMU_XEN"),             # Upstream based qemu-xen device model
-    (3, "NONE"),                 # No device model
     ])
 
 libxl_console_type = Enumeration("console_type", [
     (0, "UNKNOWN"),
     (1, "SERIAL"),
     (2, "PV"),
+    (3, "VUART"),
     ])
 
 libxl_disk_format = Enumeration("disk_format", [
@@ -173,7 +174,8 @@ libxl_timer_mode = Enumeration("timer_mode", [
     (1, "no_delay_for_missed_ticks"),
     (2, "no_missed_ticks_pending"),
     (3, "one_missed_tick_pending"),
-    ], init_val = "LIBXL_TIMER_MODE_DEFAULT")
+    ], init_val = "LIBXL_TIMER_MODE_DEFAULT",
+       check_default_fn = "libxl__timer_mode_is_default")
 
 libxl_bios_type = Enumeration("bios_type", [
     (0, "unknown"),
@@ -191,6 +193,7 @@ libxl_scheduler = Enumeration("scheduler", [
     (6, "credit2"),
     (7, "arinc653"),
     (8, "rtds"),
+    (9, "null"),
     ])
 
 # Consistent with SHUTDOWN_* in sched.h (apart from UNKNOWN)
@@ -237,6 +240,11 @@ libxl_checkpointed_stream = Enumeration("checkpointed_stream", [
     (0, "NONE"),
     (1, "REMUS"),
     (2, "COLO"),
+    ])
+
+libxl_vuart_type = Enumeration("vuart_type", [
+    (0, "unknown"),
+    (1, "sbsa_uart"),
     ])
 
 #
@@ -413,14 +421,14 @@ libxl_domain_sched_params = Struct("domain_sched_params",[
     ("cap",          integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_CAP_DEFAULT'}),
     ("period",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_PERIOD_DEFAULT'}),
     ("budget",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_BUDGET_DEFAULT'}),
+    ("extratime",    integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_EXTRATIME_DEFAULT'}),
 
-    # The following three parameters ('slice', 'latency' and 'extratime') are deprecated,
+    # The following three parameters ('slice' and 'latency') are deprecated,
     # and will have no effect if used, since the SEDF scheduler has been removed.
-    # Note that 'period' was an SDF parameter too, but it is still effective as it is
-    # now used (together with 'budget') by the RTDS scheduler.
+    # Note that 'period' and 'extratime' was an SDF parameter too, but it is still effective
+    # as they are now used (together with 'budget') by the RTDS scheduler.
     ("slice",        integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_SLICE_DEFAULT'}),
     ("latency",      integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_LATENCY_DEFAULT'}),
-    ("extratime",    integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_EXTRATIME_DEFAULT'}),
     ])
 
 libxl_vnode_info = Struct("vnode_info", [
@@ -440,6 +448,14 @@ libxl_rdm_reserve = Struct("rdm_reserve", [
     ("strategy",    libxl_rdm_reserve_strategy),
     ("policy",      libxl_rdm_reserve_policy),
     ])
+
+# Consistent with the values defined for HVM_PARAM_ALTP2M
+libxl_altp2m_mode = Enumeration("altp2m_mode", [
+    (0, "disabled"),
+    (1, "mixed"),
+    (2, "external"),
+    (3, "limited"),
+    ], init_val = "LIBXL_ALTP2M_MODE_DISABLED")
 
 libxl_domain_build_info = Struct("domain_build_info",[
     ("max_vcpus",       integer),
@@ -463,6 +479,9 @@ libxl_domain_build_info = Struct("domain_build_info",[
     ("blkdev_start",    string),
 
     ("vnuma_nodes", Array(libxl_vnode_info, "num_vnuma_nodes")),
+
+    ("max_grant_frames",    uint32, {'init_val': 'LIBXL_MAX_GRANT_FRAMES_DEFAULT'}),
+    ("max_maptrack_frames", uint32, {'init_val': 'LIBXL_MAX_MAPTRACK_FRAMES_DEFAULT'}),
     
     ("device_model_version", libxl_device_model_version),
     ("device_model_stubdomain", libxl_defbool),
@@ -497,17 +516,24 @@ libxl_domain_build_info = Struct("domain_build_info",[
     # 65000 which is reserved by the toolstack.
     ("device_tree",      string),
     ("acpi",             libxl_defbool),
+    ("bootloader",       string),
+    ("bootloader_args",  libxl_string_list),
+    ("timer_mode",       libxl_timer_mode),
+    ("nested_hvm",       libxl_defbool),
+    ("apic",             libxl_defbool),
+    ("dm_restrict",      libxl_defbool),
     ("u", KeyedUnion(None, libxl_domain_type, "type",
                 [("hvm", Struct(None, [("firmware",         string),
                                        ("bios",             libxl_bios_type),
                                        ("pae",              libxl_defbool),
-                                       ("apic",             libxl_defbool),
+                                       ("apic",             libxl_defbool, {'deprecated_by': 'apic'}),
                                        # The following acpi field is deprecated.
                                        # Please use the unified acpi field above
                                        # which works for both x86 and ARM.
                                        ("acpi",             libxl_defbool),
                                        ("acpi_s3",          libxl_defbool),
                                        ("acpi_s4",          libxl_defbool),
+                                       ("acpi_laptop_slate",libxl_defbool),
                                        ("nx",               libxl_defbool),
                                        ("viridian",         libxl_defbool),
                                        ("viridian_enable",  libxl_bitmap),
@@ -516,8 +542,11 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("hpet",             libxl_defbool),
                                        ("vpt_align",        libxl_defbool),
                                        ("mmio_hole_memkb",  MemKB),
-                                       ("timer_mode",       libxl_timer_mode),
-                                       ("nested_hvm",       libxl_defbool),
+                                       ("timer_mode",       libxl_timer_mode, {'deprecated_by': 'timer_mode'}),
+                                       ("nested_hvm",       libxl_defbool, {'deprecated_by': 'nested_hvm'}),
+                                       # The u.hvm.altp2m field is used solely
+                                       # for x86 HVM guests and is maintained
+                                       # for legacy purposes.
                                        ("altp2m",           libxl_defbool),
                                        ("system_firmware",  string),
                                        ("smbios_firmware",  string),
@@ -551,25 +580,32 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("serial_list",      libxl_string_list),
                                        ("rdm", libxl_rdm_reserve),
                                        ("rdm_mem_boundary_memkb", MemKB),
+                                       ("mca_caps",         uint64),
                                        ])),
                  ("pv", Struct(None, [("kernel", string),
                                       ("slack_memkb", MemKB),
-                                      ("bootloader", string),
-                                      ("bootloader_args", libxl_string_list),
+                                      ("bootloader", string, {'deprecated_by': 'bootloader'}),
+                                      ("bootloader_args", libxl_string_list, {'deprecated_by': 'bootloader_args'}),
                                       ("cmdline", string),
                                       ("ramdisk", string),
                                       ("features", string, {'const': True}),
                                       # Use host's E820 for PCI passthrough.
                                       ("e820_host", libxl_defbool),
                                       ])),
+                 ("pvh", None),
                  ("invalid", None),
                  ], keyvar_init_val = "LIBXL_DOMAIN_TYPE_INVALID")),
 
 
     ("arch_arm", Struct(None, [("gic_version", libxl_gic_version),
+                               ("vuart", libxl_vuart_type),
                               ])),
+    # Alternate p2m is not bound to any architecture or guest type, as it is
+    # supported by x86 HVM and ARM support is planned.
+    ("altp2m", libxl_altp2m_mode),
 
-    ], dir=DIR_IN
+    ], dir=DIR_IN,
+       copy_deprecated_fn="libxl__domain_build_info_copy_deprecated",
 )
 
 libxl_device_vfb = Struct("device_vfb", [
@@ -741,6 +777,15 @@ libxl_device_vtpm = Struct("device_vtpm", [
     ("uuid",             libxl_uuid),
 ])
 
+libxl_device_p9 = Struct("device_p9", [
+    ("backend_domid",    libxl_domid),
+    ("backend_domname",  string),
+    ("tag",              string),
+    ("path",             string),
+    ("security_model",   string),
+    ("devid",            libxl_devid),
+])
+
 libxl_device_channel = Struct("device_channel", [
     ("backend_domid", libxl_domid),
     ("backend_domname", string),
@@ -752,6 +797,20 @@ libxl_device_channel = Struct("device_channel", [
             ("socket", Struct(None, [("path", string)])),
            ])),
 ])
+
+libxl_connector_param = Struct("connector_param", [
+    ("id", string),
+    ("width", uint32),
+    ("height", uint32)
+    ])
+
+libxl_device_vdispl = Struct("device_vdispl", [
+    ("backend_domid", libxl_domid),
+    ("backend_domname", string),
+    ("devid", libxl_devid),
+    ("be_alloc", bool),
+    ("connectors", Array(libxl_connector_param, "num_connectors"))
+    ])
 
 libxl_domain_config = Struct("domain_config", [
     ("c_info", libxl_domain_create_info),
@@ -765,6 +824,8 @@ libxl_domain_config = Struct("domain_config", [
     ("vfbs", Array(libxl_device_vfb, "num_vfbs")),
     ("vkbs", Array(libxl_device_vkb, "num_vkbs")),
     ("vtpms", Array(libxl_device_vtpm, "num_vtpms")),
+    ("p9s", Array(libxl_device_p9, "num_p9s")),
+    ("vdispls", Array(libxl_device_vdispl, "num_vdispls")),
     # a channel manifests as a console with a name,
     # see docs/misc/channels.txt
     ("channels", Array(libxl_device_channel, "num_channels")),
@@ -853,12 +914,34 @@ libxl_physinfo = Struct("physinfo", [
     ("outstanding_pages", uint64),
     ("sharing_freed_pages", uint64),
     ("sharing_used_frames", uint64),
+    ("max_possible_mfn", uint64),
 
     ("nr_nodes", uint32),
     ("hw_cap", libxl_hwcap),
 
     ("cap_hvm", bool),
     ("cap_hvm_directio", bool),
+    ], dir=DIR_OUT)
+
+libxl_connectorinfo = Struct("connectorinfo", [
+    ("id", string),
+    ("width", uint32),
+    ("height", uint32),
+    ("req_evtch", integer),
+    ("req_rref", integer),
+    ("evt_evtch", integer),
+    ("evt_rref", integer),
+    ], dir=DIR_OUT)
+
+libxl_vdisplinfo = Struct("vdisplinfo", [
+    ("backend", string),
+    ("backend_id", uint32),
+    ("frontend", string),
+    ("frontend_id", uint32),
+    ("devid", libxl_devid),
+    ("state", integer),
+    ("be_alloc", bool),
+    ("connectors", Array(libxl_connectorinfo, "num_connectors"))
     ], dir=DIR_OUT)
 
 # NUMA node characteristics: size and free are how much memory it has, and how
@@ -949,6 +1032,7 @@ libxl_psr_cbm_type = Enumeration("psr_cbm_type", [
     (1, "L3_CBM"),
     (2, "L3_CBM_CODE"),
     (3, "L3_CBM_DATA"),
+    (4, "L2_CBM"),
     ])
 
 libxl_psr_cat_info = Struct("psr_cat_info", [

@@ -1,6 +1,6 @@
 /*
  *  This code provides functions to handle gcc's profiling data format
- *  introduced with gcc 4.7.
+ *  introduced with gcc 5.
  *
  *  For a better understanding, refer to gcc source:
  *  gcc/gcov-io.h
@@ -14,7 +14,7 @@
 
 #include "gcov.h"
 
-#if GCC_VERSION < 50000
+#if GCC_VERSION < 50000 || GCC_VERSION >= 70000
 #error "Wrong version of GCC used to compile gcov"
 #endif
 

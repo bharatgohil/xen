@@ -1,8 +1,6 @@
 #ifndef __ASM_ARM_PROCESSOR_H
 #define __ASM_ARM_PROCESSOR_H
 
-#include <asm/cpregs.h>
-#include <asm/sysregs.h>
 #ifndef __ASSEMBLY__
 #include <xen/types.h>
 #endif
@@ -94,6 +92,13 @@
 #define TTBCR_N_2KB  _AC(0x03,U)
 #define TTBCR_N_1KB  _AC(0x04,U)
 
+/*
+ * TTBCR_PD(0|1) can be applied only if LPAE is disabled, i.e., TTBCR.EAE==0
+ * (ARM DDI 0487B.a G6-5203 and ARM DDI 0406C.b B4-1722).
+ */
+#define TTBCR_PD0       (_AC(1,U)<<4)
+#define TTBCR_PD1       (_AC(1,U)<<5)
+
 /* SCTLR System Control Register. */
 /* HSCTLR is a subset of this. */
 #define SCTLR_TE        (_AC(1,U)<<30)
@@ -154,7 +159,20 @@
 
 /* TCR: Stage 1 Translation Control */
 
-#define TCR_T0SZ(x)     ((x)<<0)
+#define TCR_T0SZ_SHIFT  (0)
+#define TCR_T1SZ_SHIFT  (16)
+#define TCR_T0SZ(x)     ((x)<<TCR_T0SZ_SHIFT)
+
+/*
+ * According to ARM DDI 0487B.a, TCR_EL1.{T0SZ,T1SZ} (AArch64, page D7-2480)
+ * comprises 6 bits and TTBCR.{T0SZ,T1SZ} (AArch32, page G6-5204) comprises 3
+ * bits following another 3 bits for RES0. Thus, the mask for both registers
+ * should be 0x3f.
+ */
+#define TCR_SZ_MASK     (_AC(0x3f,UL))
+
+#define TCR_EPD0        (_AC(0x1,UL)<<7)
+#define TCR_EPD1        (_AC(0x1,UL)<<23)
 
 #define TCR_IRGN0_NC    (_AC(0x0,UL)<<8)
 #define TCR_IRGN0_WBWA  (_AC(0x1,UL)<<8)
@@ -170,9 +188,50 @@
 #define TCR_SH0_OS      (_AC(0x2,UL)<<12)
 #define TCR_SH0_IS      (_AC(0x3,UL)<<12)
 
-#define TCR_TG0_4K      (_AC(0x0,UL)<<14)
-#define TCR_TG0_64K     (_AC(0x1,UL)<<14)
-#define TCR_TG0_16K     (_AC(0x2,UL)<<14)
+/* Note that the fields TCR_EL1.{TG0,TG1} are not available on AArch32. */
+#define TCR_TG0_SHIFT   (14)
+#define TCR_TG0_MASK    (_AC(0x3,UL)<<TCR_TG0_SHIFT)
+#define TCR_TG0_4K      (_AC(0x0,UL)<<TCR_TG0_SHIFT)
+#define TCR_TG0_64K     (_AC(0x1,UL)<<TCR_TG0_SHIFT)
+#define TCR_TG0_16K     (_AC(0x2,UL)<<TCR_TG0_SHIFT)
+
+/* Note that the field TCR_EL2.TG1 exists only if HCR_EL2.E2H==1. */
+#define TCR_EL1_TG1_SHIFT   (30)
+#define TCR_EL1_TG1_MASK    (_AC(0x3,UL)<<TCR_EL1_TG1_SHIFT)
+#define TCR_EL1_TG1_16K     (_AC(0x1,UL)<<TCR_EL1_TG1_SHIFT)
+#define TCR_EL1_TG1_4K      (_AC(0x2,UL)<<TCR_EL1_TG1_SHIFT)
+#define TCR_EL1_TG1_64K     (_AC(0x3,UL)<<TCR_EL1_TG1_SHIFT)
+
+/*
+ * Note that the field TCR_EL1.IPS is not available on AArch32. Also, the field
+ * TCR_EL2.IPS exists only if HCR_EL2.E2H==1.
+ */
+#define TCR_EL1_IPS_SHIFT   (32)
+#define TCR_EL1_IPS_MASK    (_AC(0x7,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_32_BIT  (_AC(0x0,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_36_BIT  (_AC(0x1,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_40_BIT  (_AC(0x2,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_42_BIT  (_AC(0x3,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_44_BIT  (_AC(0x4,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_48_BIT  (_AC(0x5,ULL)<<TCR_EL1_IPS_SHIFT)
+#define TCR_EL1_IPS_52_BIT  (_AC(0x6,ULL)<<TCR_EL1_IPS_SHIFT)
+
+/*
+ * The following values correspond to the bit masks represented by
+ * TCR_EL1_IPS_XX_BIT defines.
+ */
+#define TCR_EL1_IPS_32_BIT_VAL  (32)
+#define TCR_EL1_IPS_36_BIT_VAL  (36)
+#define TCR_EL1_IPS_40_BIT_VAL  (40)
+#define TCR_EL1_IPS_42_BIT_VAL  (42)
+#define TCR_EL1_IPS_44_BIT_VAL  (44)
+#define TCR_EL1_IPS_48_BIT_VAL  (48)
+#define TCR_EL1_IPS_52_BIT_VAL  (52)
+#define TCR_EL1_IPS_MIN_VAL     (25)
+
+/* Note that the fields TCR_EL2.TBI(0|1) exist only if HCR_EL2.E2H==1. */
+#define TCR_EL1_TBI0    (_AC(0x1,ULL)<<37)
+#define TCR_EL1_TBI1    (_AC(0x1,ULL)<<38)
 
 #ifdef CONFIG_ARM_64
 
@@ -252,6 +311,7 @@
 #define HSR_EC_HVC32                0x12
 #define HSR_EC_SMC32                0x13
 #ifdef CONFIG_ARM_64
+#define HSR_EC_SVC64                0x15
 #define HSR_EC_HVC64                0x16
 #define HSR_EC_SMC64                0x17
 #define HSR_EC_SYSREG               0x18
@@ -487,6 +547,23 @@ union hsr {
         unsigned long ec:6;     /* Exception Class */
     } cp; /* HSR_EC_CP */
 
+    /*
+     * This encoding is valid only for ARMv8 (ARM DDI 0487B.a, pages D7-2271 and
+     * G6-4957). On ARMv7, encoding ISS for EC=0x13 is defined as UNK/SBZP
+     * (ARM DDI 0406C.c page B3-1431). UNK/SBZP means that hardware implements
+     * this field as Read-As-Zero. ARMv8 is backwards compatible with ARMv7:
+     * reading CCKNOWNPASS on ARMv7 will return 0, which means that condition
+     * check was passed or instruction was unconditional.
+     */
+    struct hsr_smc32 {
+        unsigned long res0:19;  /* Reserved */
+        unsigned long ccknownpass:1; /* Instruction passed conditional check */
+        unsigned long cc:4;    /* Condition Code */
+        unsigned long ccvalid:1;/* CC Valid */
+        unsigned long len:1;   /* Instruction length */
+        unsigned long ec:6;    /* Exception Class */
+    } smc32; /* HSR_EC_SMC32 */
+
 #ifdef CONFIG_ARM_64
     struct hsr_sysreg {
         unsigned long read:1;   /* Direction */
@@ -504,11 +581,12 @@ union hsr {
 
     struct hsr_iabt {
         unsigned long ifsc:6;  /* Instruction fault status code */
-        unsigned long res0:1;
+        unsigned long res0:1;  /* RES0 */
         unsigned long s1ptw:1; /* Stage 2 fault during stage 1 translation */
-        unsigned long res1:1;
+        unsigned long res1:1;  /* RES0 */
         unsigned long eat:1;   /* External abort type */
-        unsigned long res2:15;
+        unsigned long fnv:1;   /* FAR not Valid */
+        unsigned long res2:14;
         unsigned long len:1;   /* Instruction length */
         unsigned long ec:6;    /* Exception Class */
     } iabt; /* HSR_EC_INSTR_ABORT_* */
@@ -519,10 +597,11 @@ union hsr {
         unsigned long s1ptw:1; /* Stage 2 fault during stage 1 translation */
         unsigned long cache:1; /* Cache Maintenance */
         unsigned long eat:1;   /* External Abort Type */
+        unsigned long fnv:1;   /* FAR not Valid */
 #ifdef CONFIG_ARM_32
-        unsigned long sbzp0:6;
+        unsigned long sbzp0:5;
 #else
-        unsigned long sbzp0:4;
+        unsigned long sbzp0:3;
         unsigned long ar:1;    /* Acquire Release */
         unsigned long sf:1;    /* Sixty Four bit register */
 #endif
@@ -533,6 +612,19 @@ union hsr {
         unsigned long len:1;   /* Instruction length */
         unsigned long ec:6;    /* Exception Class */
     } dabt; /* HSR_EC_DATA_ABORT_* */
+
+    /* Contain the common bits between DABT and IABT */
+    struct hsr_xabt {
+        unsigned long fsc:6;    /* Fault status code */
+        unsigned long pad1:1;   /* Not common */
+        unsigned long s1ptw:1;  /* Stage 2 fault during stage 1 translation */
+        unsigned long pad2:1;   /* Not common */
+        unsigned long eat:1;    /* External abort type */
+        unsigned long fnv:1;    /* FAR not Valid */
+        unsigned long pad3:14;  /* Not common */
+        unsigned long len:1;    /* Instruction length */
+        unsigned long ec:6;     /* Exception Class */
+    } xabt;
 
 #ifdef CONFIG_ARM_64
     struct hsr_brk {
@@ -580,6 +672,9 @@ union hsr {
 #define HSR_SYSREG_REGS_MASK (HSR_SYSREG_OP0_MASK|HSR_SYSREG_OP1_MASK|\
                               HSR_SYSREG_CRN_MASK|HSR_SYSREG_CRM_MASK|\
                               HSR_SYSREG_OP2_MASK)
+
+/* HSR.EC == HSR_{HVC32, HVC64, SMC64, SVC32, SVC64} */
+#define HSR_XXC_IMM_MASK     (0xffff)
 
 /* Physical Address Register */
 #define PAR_F           (_AC(1,U)<<0)
@@ -698,6 +793,7 @@ void show_registers(struct cpu_user_regs *regs);
 
 void noreturn do_unexpected_trap(const char *msg, struct cpu_user_regs *regs);
 
+struct vcpu;
 void vcpu_regs_hyp_to_user(const struct vcpu *vcpu,
                            struct vcpu_guest_core_regs *regs);
 void vcpu_regs_user_to_hyp(struct vcpu *vcpu,
@@ -706,7 +802,33 @@ void vcpu_regs_user_to_hyp(struct vcpu *vcpu,
 int call_smc(register_t function_id, register_t arg0, register_t arg1,
              register_t arg2);
 
-void do_trap_guest_error(struct cpu_user_regs *regs);
+void do_trap_hyp_serror(struct cpu_user_regs *regs);
+
+void do_trap_guest_serror(struct cpu_user_regs *regs);
+
+register_t get_default_hcr_flags(void);
+
+/* Functions for pending virtual abort checking window. */
+void abort_guest_exit_start(void);
+void abort_guest_exit_end(void);
+
+#define VABORT_GEN_BY_GUEST(r)  \
+( \
+    ( (unsigned long)abort_guest_exit_start == (r)->pc ) || \
+    ( (unsigned long)abort_guest_exit_end == (r)->pc ) \
+)
+
+/*
+ * Synchronize SError unless the feature is selected.
+ * This is relying on the SErrors are currently unmasked.
+ */
+#define SYNCHRONIZE_SERROR(feat)                                  \
+    do {                                                          \
+        ASSERT(!cpus_have_cap(feat) || local_abort_is_enabled()); \
+        asm volatile(ALTERNATIVE("dsb sy; isb",                   \
+                                 "nop; nop", feat)                \
+                                 : : : "memory");                 \
+    } while (0)
 
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_ARM_PROCESSOR_H */

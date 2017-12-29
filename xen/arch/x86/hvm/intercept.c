@@ -127,6 +127,7 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
             addr = (p->type == IOREQ_TYPE_COPY) ?
                    p->addr + step * i :
                    p->addr;
+            data = 0;
             rc = ops->read(handler, addr, p->size, &data);
             if ( rc != X86EMUL_OKAY )
                 break;
@@ -136,14 +137,14 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
                 switch ( hvm_copy_to_guest_phys(p->data + step * i,
                                                 &data, p->size, current) )
                 {
-                case HVMCOPY_okay:
+                case HVMTRANS_okay:
                     break;
-                case HVMCOPY_bad_gfn_to_mfn:
+                case HVMTRANS_bad_gfn_to_mfn:
                     /* Drop the write as real hardware would. */
                     continue;
-                case HVMCOPY_bad_gva_to_gfn:
-                case HVMCOPY_gfn_paged_out:
-                case HVMCOPY_gfn_shared:
+                case HVMTRANS_bad_linear_to_gfn:
+                case HVMTRANS_gfn_paged_out:
+                case HVMTRANS_gfn_shared:
                     ASSERT_UNREACHABLE();
                     /* fall through */
                 default:
@@ -161,17 +162,18 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
         {
             if ( p->data_is_ptr )
             {
+                data = 0;
                 switch ( hvm_copy_from_guest_phys(&data, p->data + step * i,
                                                   p->size) )
                 {
-                case HVMCOPY_okay:
+                case HVMTRANS_okay:
                     break;
-                case HVMCOPY_bad_gfn_to_mfn:
+                case HVMTRANS_bad_gfn_to_mfn:
                     data = ~0;
                     break;
-                case HVMCOPY_bad_gva_to_gfn:
-                case HVMCOPY_gfn_paged_out:
-                case HVMCOPY_gfn_shared:
+                case HVMTRANS_bad_linear_to_gfn:
+                case HVMTRANS_gfn_paged_out:
+                case HVMTRANS_gfn_shared:
                     ASSERT_UNREACHABLE();
                     /* fall through */
                 default:

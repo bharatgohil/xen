@@ -21,6 +21,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <time.h>
+#include <syslog.h>
 
 #include "utils.h"
 #include "talloc.h"
@@ -74,6 +76,11 @@ struct domain
 
 	/* number of watch for this domain */
 	int nbwatch;
+
+	/* write rate limit */
+	wrl_creditt wrl_credit; /* [ -wrl_config_writecost, +_dburst ] */
+	struct wrl_timestampt wrl_timestamp;
+	bool wrl_delay_logged;
 };
 
 static LIST_HEAD(domains);
@@ -206,16 +213,19 @@ static int destroy_domain(void *_domain)
 
 	fire_watches(NULL, domain, "@releaseDomain", false);
 
+	wrl_domain_destroy(domain);
+
 	return 0;
 }
 
 static void domain_cleanup(void)
 {
 	xc_dominfo_t dominfo;
-	struct domain *domain, *tmp;
+	struct domain *domain;
 	int notify = 0;
 
-	list_for_each_entry_safe(domain, tmp, &domains, list) {
+ again:
+	list_for_each_entry(domain, &domains, list) {
 		if (xc_domain_getinfo(*xc_handle, domain->domid, 1,
 				      &dominfo) == 1 &&
 		    dominfo.domid == domain->domid) {
@@ -227,8 +237,12 @@ static void domain_cleanup(void)
 			if (!dominfo.dying)
 				continue;
 		}
-		talloc_free(domain->conn);
-		notify = 0; /* destroy_domain() fires the watch */
+		if (domain->conn) {
+			talloc_unlink(talloc_autofree_context(), domain->conn);
+			domain->conn = NULL;
+			notify = 0; /* destroy_domain() fires the watch */
+			goto again;
+		}
 	}
 
 	if (notify)
@@ -253,12 +267,21 @@ void handle_event(void)
 bool domain_can_read(struct connection *conn)
 {
 	struct xenstore_domain_interface *intf = conn->domain->interface;
+
+	if (domain_is_unprivileged(conn) && conn->domain->wrl_credit < 0)
+		return false;
 	return (intf->req_cons != intf->req_prod);
+}
+
+static bool domid_is_unprivileged(unsigned int domid)
+{
+	return domid != 0 && domid != priv_domid;
 }
 
 bool domain_is_unprivileged(struct connection *conn)
 {
-	return (conn && conn->domain && conn->domain->domid != 0 && conn->domain->domid != priv_domid);
+	return conn && conn->domain &&
+	       domid_is_unprivileged(conn->domain->domid);
 }
 
 bool domain_can_write(struct connection *conn)
@@ -288,6 +311,8 @@ static struct domain *new_domain(void *context, unsigned int domid,
 	domain->path = talloc_domain_path(domain, domid);
 	if (!domain->path)
 		return NULL;
+
+	wrl_domain_new(domain);
 
 	list_add(&domain->list, &domains);
 	talloc_set_destructor(domain, destroy_domain);
@@ -685,13 +710,23 @@ void domain_entry_dec(struct connection *conn, struct node *node)
 	}
 }
 
-void domain_entry_fix(unsigned int domid, int num)
+int domain_entry_fix(unsigned int domid, int num, bool update)
 {
 	struct domain *d;
+	int cnt;
 
 	d = find_domain_by_domid(domid);
-	if (d && ((d->nbentry += num) < 0))
-		d->nbentry = 0;
+	if (!d)
+		return 0;
+
+	cnt = d->nbentry + num;
+	if (cnt < 0)
+		cnt = 0;
+
+	if (update)
+		d->nbentry = cnt;
+
+	return domid_is_unprivileged(domid) ? cnt : 0;
 }
 
 int domain_entry(struct connection *conn)
@@ -721,6 +756,233 @@ int domain_watch(struct connection *conn)
 	return (domain_is_unprivileged(conn))
 		? conn->domain->nbwatch
 		: 0;
+}
+
+static wrl_creditt wrl_config_writecost      = WRL_FACTOR;
+static wrl_creditt wrl_config_rate           = WRL_RATE   * WRL_FACTOR;
+static wrl_creditt wrl_config_dburst         = WRL_DBURST * WRL_FACTOR;
+static wrl_creditt wrl_config_gburst         = WRL_GBURST * WRL_FACTOR;
+static wrl_creditt wrl_config_newdoms_dburst =
+	                         WRL_DBURST * WRL_NEWDOMS * WRL_FACTOR;
+
+long wrl_ntransactions;
+
+static long wrl_ndomains;
+static wrl_creditt wrl_reserve; /* [-wrl_config_newdoms_dburst, +_gburst ] */
+static time_t wrl_log_last_warning; /* 0: no previous warning */
+
+void wrl_gettime_now(struct wrl_timestampt *now_wt)
+{
+	struct timespec now_ts;
+	int r;
+
+	r = clock_gettime(CLOCK_MONOTONIC, &now_ts);
+	if (r)
+		barf_perror("Could not find time (clock_gettime failed)");
+
+	now_wt->sec = now_ts.tv_sec;
+	now_wt->msec = now_ts.tv_nsec / 1000000;
+}
+
+static void wrl_xfer_credit(wrl_creditt *debit,  wrl_creditt debit_floor,
+			    wrl_creditt *credit, wrl_creditt credit_ceil)
+	/*
+	 * Transfers zero or more credit from "debit" to "credit".
+	 * Transfers as much as possible while maintaining
+	 * debit >= debit_floor and credit <= credit_ceil.
+	 * (If that's violated already, does nothing.)
+	 *
+	 * Sufficient conditions to avoid overflow, either of:
+	 *  |every argument| <= 0x3fffffff
+	 *  |every argument| <= 1E9
+	 *  |every argument| <= WRL_CREDIT_MAX
+	 * (And this condition is preserved.)
+	 */
+{
+	wrl_creditt xfer = MIN( *debit      - debit_floor,
+			        credit_ceil - *credit      );
+	if (xfer > 0) {
+		*debit -= xfer;
+		*credit += xfer;
+	}
+}
+
+void wrl_domain_new(struct domain *domain)
+{
+	domain->wrl_credit = 0;
+	wrl_gettime_now(&domain->wrl_timestamp);
+	wrl_ndomains++;
+	/* Steal up to DBURST from the reserve */
+	wrl_xfer_credit(&wrl_reserve, -wrl_config_newdoms_dburst,
+			&domain->wrl_credit, wrl_config_dburst);
+}
+
+void wrl_domain_destroy(struct domain *domain)
+{
+	wrl_ndomains--;
+	/*
+	 * Don't bother recalculating domain's credit - this just
+	 * means we don't give the reserve the ending domain's credit
+	 * for time elapsed since last update.
+	 */
+	wrl_xfer_credit(&domain->wrl_credit, 0,
+			&wrl_reserve, wrl_config_dburst);
+}
+
+void wrl_credit_update(struct domain *domain, struct wrl_timestampt now)
+{
+	/*
+	 * We want to calculate
+	 *    credit += (now - timestamp) * RATE / ndoms;
+	 * But we want it to saturate, and to avoid floating point.
+	 * To avoid rounding errors from constantly adding small
+	 * amounts of credit, we only add credit for whole milliseconds.
+	 */
+	long seconds      = now.sec -  domain->wrl_timestamp.sec;
+	long milliseconds = now.msec - domain->wrl_timestamp.msec;
+	long msec;
+	int64_t denom, num;
+	wrl_creditt surplus;
+
+	seconds = MIN(seconds, 1000*1000); /* arbitrary, prevents overflow */
+	msec = seconds * 1000 + milliseconds;
+
+	if (msec < 0)
+                /* shouldn't happen with CLOCK_MONOTONIC */
+		msec = 0;
+
+	/* 32x32 -> 64 cannot overflow */
+	denom = (int64_t)msec * wrl_config_rate;
+	num  =  (int64_t)wrl_ndomains * 1000;
+	/* denom / num <= 1E6 * wrl_config_rate, so with
+	   reasonable wrl_config_rate, denom / num << 2^64 */
+
+	/* at last! */
+	domain->wrl_credit = MIN( (int64_t)domain->wrl_credit + denom / num,
+				  WRL_CREDIT_MAX );
+	/* (maybe briefly violating the DBURST cap on wrl_credit) */
+
+	/* maybe take from the reserve to make us nonnegative */
+	wrl_xfer_credit(&wrl_reserve,        0,
+			&domain->wrl_credit, 0);
+
+	/* return any surplus (over DBURST) to the reserve */
+	surplus = 0;
+	wrl_xfer_credit(&domain->wrl_credit, wrl_config_dburst,
+			&surplus,            WRL_CREDIT_MAX);
+	wrl_xfer_credit(&surplus,     0,
+			&wrl_reserve, wrl_config_gburst);
+	/* surplus is now implicitly discarded */
+
+	domain->wrl_timestamp = now;
+
+	trace("wrl: dom %4d %6ld  msec  %9ld credit   %9ld reserve"
+	      "  %9ld discard\n",
+	      domain->domid,
+	      msec,
+	      (long)domain->wrl_credit, (long)wrl_reserve,
+	      (long)surplus);
+}
+
+void wrl_check_timeout(struct domain *domain,
+		       struct wrl_timestampt now,
+		       int *ptimeout)
+{
+	uint64_t num, denom;
+	int wakeup;
+
+	wrl_credit_update(domain, now);
+
+	if (domain->wrl_credit >= 0)
+		/* not blocked */
+		return;
+
+	if (!*ptimeout)
+		/* already decided on immediate wakeup,
+		   so no need to calculate our timeout */
+		return;
+
+	/* calculate  wakeup = now + -credit / (RATE / ndoms); */
+
+	/* credit cannot go more -ve than one transaction,
+	 * so the first multiplication cannot overflow even 32-bit */
+	num   = (uint64_t)(-domain->wrl_credit * 1000) * wrl_ndomains;
+	denom = wrl_config_rate;
+
+	wakeup = MIN( num / denom /* uint64_t */, INT_MAX );
+	if (*ptimeout==-1 || wakeup < *ptimeout)
+		*ptimeout = wakeup;
+
+	trace("wrl: domain %u credit=%ld (reserve=%ld) SLEEPING for %d\n",
+	      domain->domid,
+	      (long)domain->wrl_credit, (long)wrl_reserve,
+	      wakeup);
+}
+
+#define WRL_LOG(now, ...) \
+	(syslog(LOG_WARNING, "write rate limit: " __VA_ARGS__))
+
+void wrl_apply_debit_actual(struct domain *domain)
+{
+	struct wrl_timestampt now;
+
+	if (!domain)
+		/* sockets escape the write rate limit */
+		return;
+
+	wrl_gettime_now(&now);
+	wrl_credit_update(domain, now);
+
+	domain->wrl_credit -= wrl_config_writecost;
+	trace("wrl: domain %u credit=%ld (reserve=%ld)\n",
+	      domain->domid,
+	      (long)domain->wrl_credit, (long)wrl_reserve);
+
+	if (domain->wrl_credit < 0) {
+		if (!domain->wrl_delay_logged) {
+			domain->wrl_delay_logged = true;
+			WRL_LOG(now, "domain %ld is affected",
+				(long)domain->domid);
+		} else if (!wrl_log_last_warning) {
+			WRL_LOG(now, "rate limiting restarts");
+		}
+		wrl_log_last_warning = now.sec;
+	}
+}
+
+void wrl_log_periodic(struct wrl_timestampt now)
+{
+	if (wrl_log_last_warning &&
+	    (now.sec - wrl_log_last_warning) > WRL_LOGEVERY) {
+		WRL_LOG(now, "not in force recently");
+		wrl_log_last_warning = 0;
+	}
+}
+
+void wrl_apply_debit_direct(struct connection *conn)
+{
+	if (!conn)
+		/* some writes are generated internally */
+		return;
+
+	if (conn->transaction)
+		/* these are accounted for when the transaction ends */
+		return;
+
+	if (!wrl_ntransactions)
+		/* we don't conflict with anyone */
+		return;
+
+	wrl_apply_debit_actual(conn->domain);
+}
+
+void wrl_apply_debit_trans_commit(struct connection *conn)
+{
+	if (wrl_ntransactions <= 1)
+		/* our own transaction appears in the counter */
+		return;
+
+	wrl_apply_debit_actual(conn->domain);
 }
 
 /*

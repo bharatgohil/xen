@@ -106,7 +106,7 @@ struct mem_hotadd_info
     unsigned long cur;
 };
 
-int hotadd_mem_valid(unsigned long pfn, struct mem_hotadd_info *info)
+static int hotadd_mem_valid(unsigned long pfn, struct mem_hotadd_info *info)
 {
     return (pfn < info->epfn && pfn >= info->spfn);
 }
@@ -140,13 +140,11 @@ static int m2p_mapped(unsigned long spfn)
     {
         case _PAGE_PSE|_PAGE_PRESENT:
             return M2P_1G_MAPPED;
-            break;
         /* Check for next level */
         case _PAGE_PRESENT:
             break;
         default:
             return M2P_NO_MAPPED;
-            break;
     }
     l2_ro_mpt = l3e_to_l2e(l3_ro_mpt[l3_table_offset(va)]);
 
@@ -156,7 +154,7 @@ static int m2p_mapped(unsigned long spfn)
     return M2P_NO_MAPPED;
 }
 
-int share_hotadd_m2p_table(struct mem_hotadd_info *info)
+static int share_hotadd_m2p_table(struct mem_hotadd_info *info)
 {
     unsigned long i, n, v, m2p_start_mfn = 0;
     l3_pgentry_t l3e;
@@ -257,7 +255,7 @@ static void destroy_compat_m2p_mapping(struct mem_hotadd_info *info)
     return;
 }
 
-void destroy_m2p_mapping(struct mem_hotadd_info *info)
+static void destroy_m2p_mapping(struct mem_hotadd_info *info)
 {
     l3_pgentry_t *l3_ro_mpt;
     unsigned long i, va, rwva;
@@ -470,7 +468,7 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
                 clear_page(l2_ro_mpt);
                 l3e_write(&l3_ro_mpt[l3_table_offset(va)],
                           l3e_from_paddr(__pa(l2_ro_mpt),
-                                         __PAGE_HYPERVISOR | _PAGE_USER));
+                                         __PAGE_HYPERVISOR_RO | _PAGE_USER));
                 l2_ro_mpt += l2_table_offset(va);
             }
 
@@ -496,7 +494,7 @@ void __init paging_init(void)
     unsigned int n, memflags;
     l3_pgentry_t *l3_ro_mpt;
     l2_pgentry_t *l2_ro_mpt = NULL;
-    struct page_info *l1_pg, *l2_pg, *l3_pg;
+    struct page_info *l1_pg;
 
     /*
      * We setup the L3s for 1:1 mapping if host support memory hotplug
@@ -509,23 +507,22 @@ void __init paging_init(void)
         if ( !(l4e_get_flags(idle_pg_table[l4_table_offset(va)]) &
               _PAGE_PRESENT) )
         {
-            l3_pg = alloc_domheap_page(NULL, 0);
-            if ( !l3_pg )
+            l3_pgentry_t *pl3t = alloc_xen_pagetable();
+
+            if ( !pl3t )
                 goto nomem;
-            l3_ro_mpt = page_to_virt(l3_pg);
-            clear_page(l3_ro_mpt);
+            clear_page(pl3t);
             l4e_write(&idle_pg_table[l4_table_offset(va)],
-                      l4e_from_page(l3_pg, __PAGE_HYPERVISOR));
+                      l4e_from_paddr(__pa(pl3t), __PAGE_HYPERVISOR_RW));
         }
     }
 
     /* Create user-accessible L2 directory to map the MPT for guests. */
-    if ( (l3_pg = alloc_domheap_page(NULL, 0)) == NULL )
+    if ( (l3_ro_mpt = alloc_xen_pagetable()) == NULL )
         goto nomem;
-    l3_ro_mpt = page_to_virt(l3_pg);
     clear_page(l3_ro_mpt);
     l4e_write(&idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)],
-              l4e_from_page(l3_pg, __PAGE_HYPERVISOR | _PAGE_USER));
+              l4e_from_paddr(__pa(l3_ro_mpt), __PAGE_HYPERVISOR_RO | _PAGE_USER));
 
     /*
      * Allocate and map the machine-to-phys table.
@@ -607,12 +604,12 @@ void __init paging_init(void)
         }
         if ( !((unsigned long)l2_ro_mpt & ~PAGE_MASK) )
         {
-            if ( (l2_pg = alloc_domheap_page(NULL, memflags)) == NULL )
+            if ( (l2_ro_mpt = alloc_xen_pagetable()) == NULL )
                 goto nomem;
-            l2_ro_mpt = page_to_virt(l2_pg);
             clear_page(l2_ro_mpt);
             l3e_write(&l3_ro_mpt[l3_table_offset(va)],
-                      l3e_from_page(l2_pg, __PAGE_HYPERVISOR | _PAGE_USER));
+                      l3e_from_paddr(__pa(l2_ro_mpt),
+                                     __PAGE_HYPERVISOR_RO | _PAGE_USER));
             ASSERT(!l2_table_offset(va));
         }
         /* NB. Cannot be GLOBAL: guest user mode should not see it. */
@@ -634,7 +631,7 @@ void __init paging_init(void)
     compat_idle_pg_table_l2 = l2_ro_mpt;
     clear_page(l2_ro_mpt);
     l3e_write(&l3_ro_mpt[l3_table_offset(HIRO_COMPAT_MPT_VIRT_START)],
-              l3e_from_paddr(__pa(l2_ro_mpt), __PAGE_HYPERVISOR));
+              l3e_from_paddr(__pa(l2_ro_mpt), __PAGE_HYPERVISOR_RO));
     l2_ro_mpt += l2_table_offset(HIRO_COMPAT_MPT_VIRT_START);
     /* Allocate and map the compatibility mode machine-to-phys table. */
     mpt_size = (mpt_size >> 1) + (1UL << (L2_PAGETABLE_SHIFT - 1));
@@ -679,7 +676,7 @@ void __init paging_init(void)
 
     /* Set up linear page table mapping. */
     l4e_write(&idle_pg_table[l4_table_offset(LINEAR_PT_VIRT_START)],
-              l4e_from_paddr(__pa(idle_pg_table), __PAGE_HYPERVISOR));
+              l4e_from_paddr(__pa(idle_pg_table), __PAGE_HYPERVISOR_RW));
     return;
 
  nomem:
@@ -713,7 +710,7 @@ void free_compat_arg_xlat(struct vcpu *v)
                               PFN_UP(COMPAT_ARG_XLAT_SIZE));
 }
 
-void cleanup_frame_table(struct mem_hotadd_info *info)
+static void cleanup_frame_table(struct mem_hotadd_info *info)
 {
     unsigned long sva, eva;
     l3_pgentry_t l3e;
@@ -890,32 +887,21 @@ void __init subarch_init_memory(void)
         }
     }
 
-    /* Mark low 16Mb of direct map NX if hardware supports it. */
+    /* Mark all of direct map NX if hardware supports it. */
     if ( !cpu_has_nx )
         return;
 
-    v = DIRECTMAP_VIRT_START + (1UL << 20);
-    l3e = l4e_to_l3e(idle_pg_table[l4_table_offset(v)])[l3_table_offset(v)];
-    ASSERT(l3e_get_flags(l3e) & _PAGE_PRESENT);
-    do {
-        l2e = l3e_to_l2e(l3e)[l2_table_offset(v)];
-        ASSERT(l2e_get_flags(l2e) & _PAGE_PRESENT);
-        if ( l2e_get_flags(l2e) & _PAGE_PSE )
-        {
-            l2e_add_flags(l2e, _PAGE_NX_BIT);
-            l3e_to_l2e(l3e)[l2_table_offset(v)] = l2e;
-            v += 1 << L2_PAGETABLE_SHIFT;
-        }
-        else
-        {
-            l1_pgentry_t l1e = l2e_to_l1e(l2e)[l1_table_offset(v)];
+    for ( i = l4_table_offset(DIRECTMAP_VIRT_START);
+          i < l4_table_offset(DIRECTMAP_VIRT_END); ++i )
+    {
+        l4_pgentry_t l4e = idle_pg_table[i];
 
-            ASSERT(l1e_get_flags(l1e) & _PAGE_PRESENT);
-            l1e_add_flags(l1e, _PAGE_NX_BIT);
-            l2e_to_l1e(l2e)[l1_table_offset(v)] = l1e;
-            v += 1 << L1_PAGETABLE_SHIFT;
+        if ( l4e_get_flags(l4e) & _PAGE_PRESENT )
+        {
+            l4e_add_flags(l4e, _PAGE_NX_BIT);
+            idle_pg_table[i] = l4e;
         }
-    } while ( v < DIRECTMAP_VIRT_START + (16UL << 20) );
+    }
 }
 
 long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
@@ -1076,7 +1062,7 @@ long do_set_segment_base(unsigned int which, unsigned long base)
             "     jmp  1b             \n"
             ".previous                \n"
             _ASM_EXTABLE(1b, 2b)
-            : : "r" (base&0xffff) );
+            : "+r" (base) );
         break;
 
     default:
@@ -1273,7 +1259,7 @@ unsigned int domain_clamp_alloc_bitsize(struct domain *d, unsigned int bits)
     return min(d->arch.physaddr_bitsize, bits);
 }
 
-int transfer_pages_to_heap(struct mem_hotadd_info *info)
+static int transfer_pages_to_heap(struct mem_hotadd_info *info)
 {
     unsigned long i;
     struct page_info *pg;
@@ -1293,7 +1279,7 @@ int transfer_pages_to_heap(struct mem_hotadd_info *info)
     return 0;
 }
 
-int mem_hotadd_check(unsigned long spfn, unsigned long epfn)
+static int mem_hotadd_check(unsigned long spfn, unsigned long epfn)
 {
     unsigned long s, e, length, sidx, eidx;
 

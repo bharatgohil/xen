@@ -23,6 +23,7 @@
 #include <xen/hvm/e820.h>
 #include <sys/types.h>
 #include <pwd.h>
+#include <grp.h>
 
 static const char *libxl_tapif_script(libxl__gc *gc)
 {
@@ -559,9 +560,9 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         }
         if (libxl_defbool_val(b_info->u.hvm.usb)
             || b_info->u.hvm.usbdevice
-            || b_info->u.hvm.usbdevice_list) {
-            if ( b_info->u.hvm.usbdevice && b_info->u.hvm.usbdevice_list )
-            {
+            || libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
+            if (b_info->u.hvm.usbdevice
+                && libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
                 LOGD(ERROR, domid, "Both usbdevice and usbdevice_list set");
                 return ERROR_INVAL;
             }
@@ -641,6 +642,12 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
             flexarray_append(dm_args, "-nographic");
     }
 
+    if (libxl_defbool_val(b_info->dm_restrict)) {
+        LOGD(ERROR, domid,
+             "dm_restrict not supported by qemu-xen-traditional");
+        return ERROR_INVAL;
+    }
+
     if (state->saved_state) {
         flexarray_vappend(dm_args, "-loadvm", state->saved_state, NULL);
     }
@@ -648,6 +655,7 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         flexarray_append(dm_args, b_info->extra[i]);
     flexarray_append(dm_args, "-M");
     switch (b_info->type) {
+    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         flexarray_append(dm_args, "xenpv");
         for (i = 0; b_info->extra_pv && b_info->extra_pv[i] != NULL; i++)
@@ -742,36 +750,53 @@ libxl__detect_gfx_passthru_kind(libxl__gc *gc,
     return LIBXL_GFX_PASSTHRU_KIND_DEFAULT;
 }
 
-/* return 1 if the user was found, 0 if it was not, -1 on error */
-static int libxl__dm_runas_helper(libxl__gc *gc, const char *username)
-{
-    struct passwd pwd, *user = NULL;
-    char *buf = NULL;
-    long buf_size;
-    int ret;
-
-    buf_size = sysconf(_SC_GETPW_R_SIZE_MAX);
-    if (buf_size < 0) {
-        buf_size = 2048;
-        LOG(DEBUG,
-"sysconf(_SC_GETPW_R_SIZE_MAX) failed, setting the initial buffer size to %ld",
-            buf_size);
+/*
+ *  userlookup_helper_getpwnam(libxl__gc*, const char *user,
+ *                             struct passwd **pwd_r);
+ *
+ *  userlookup_helper_getpwuid(libxl__gc*, uid_t uid,
+ *                             struct passwd **pwd_r);
+ *
+ *  returns 1 if the user was found, 0 if it was not, -1 on error
+ */
+#define DEFINE_USERLOOKUP_HELPER(NAME,SPEC_TYPE,STRUCTNAME,SYSCONF)     \
+    static int userlookup_helper_##NAME(libxl__gc *gc,                  \
+                                        SPEC_TYPE spec,                 \
+                                        struct STRUCTNAME *resultbuf,   \
+                                        struct STRUCTNAME **out)        \
+    {                                                                   \
+        struct STRUCTNAME *resultp = NULL;                              \
+        char *buf = NULL;                                               \
+        long buf_size;                                                  \
+        int ret;                                                        \
+                                                                        \
+        buf_size = sysconf(SYSCONF);                                    \
+        if (buf_size < 0) {                                             \
+            buf_size = 2048;                                            \
+            LOG(DEBUG,                                                  \
+    "sysconf failed, setting the initial buffer size to %ld",           \
+                buf_size);                                              \
+        }                                                               \
+                                                                        \
+        while (1) {                                                     \
+            buf = libxl__realloc(gc, buf, buf_size);                    \
+            ret = NAME##_r(spec, resultbuf, buf, buf_size, &resultp);   \
+            if (ret == ERANGE) {                                        \
+                buf_size += 128;                                        \
+                continue;                                               \
+            }                                                           \
+            if (ret != 0)                                               \
+                return ERROR_FAIL;                                      \
+            if (resultp != NULL) {                                      \
+                if (out) *out = resultp;                                \
+                return 1;                                               \
+            }                                                           \
+            return 0;                                                   \
+        }                                                               \
     }
 
-    while (1) {
-        buf = libxl__realloc(gc, buf, buf_size);
-        ret = getpwnam_r(username, &pwd, buf, buf_size, &user);
-        if (ret == ERANGE) {
-            buf_size += 128;
-            continue;
-        }
-        if (ret != 0)
-            return ERROR_FAIL;
-        if (user != NULL)
-            return 1;
-        return 0;
-    }
-}
+DEFINE_USERLOOKUP_HELPER(getpwnam, const char*, passwd, _SC_GETPW_R_SIZE_MAX);
+DEFINE_USERLOOKUP_HELPER(getpwuid, uid_t,       passwd, _SC_GETPW_R_SIZE_MAX);
 
 /* colo mode */
 enum {
@@ -932,6 +957,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
     uint64_t ram_size;
     const char *path, *chardev;
     char *user = NULL;
+    struct passwd *user_base, user_pwbuf;
 
     dm_args = flexarray_make(gc, 16, 1);
     dm_envs = flexarray_make(gc, 16, 1);
@@ -1149,9 +1175,9 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         }
         if (libxl_defbool_val(b_info->u.hvm.usb)
             || b_info->u.hvm.usbdevice
-            || b_info->u.hvm.usbdevice_list) {
-            if ( b_info->u.hvm.usbdevice && b_info->u.hvm.usbdevice_list )
-            {
+            || libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
+            if (b_info->u.hvm.usbdevice
+                && libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
                 LOGD(ERROR, guest_domid, "Both usbdevice and usbdevice_list set");
                 return ERROR_INVAL;
             }
@@ -1396,6 +1422,9 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         }
     }
 
+    if (libxl_defbool_val(b_info->dm_restrict))
+        flexarray_append(dm_args, "-xen-domid-restrict");
+
     if (state->saved_state) {
         /* This file descriptor is meant to be used by QEMU */
         *dm_state_fd = open(state->saved_state, O_RDONLY);
@@ -1407,6 +1436,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
 
     flexarray_append(dm_args, "-machine");
     switch (b_info->type) {
+    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         flexarray_append(dm_args, "xenpv");
         for (i = 0; b_info->extra_pv && b_info->extra_pv[i] != NULL; i++)
@@ -1624,15 +1654,48 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
             goto end_search;
         }
 
+        if (!libxl_defbool_val(b_info->dm_restrict)) {
+            LOGD(DEBUG, guest_domid,
+                 "dm_restrict disabled, starting QEMU as root");
+            goto end_search;
+        }
+
         user = GCSPRINTF("%s%d", LIBXL_QEMU_USER_BASE, guest_domid);
-        ret = libxl__dm_runas_helper(gc, user);
+        ret = userlookup_helper_getpwnam(gc, user, &user_pwbuf, 0);
         if (ret < 0)
             return ret;
         if (ret > 0)
             goto end_search;
 
+        ret = userlookup_helper_getpwnam(gc, LIBXL_QEMU_USER_RANGE_BASE,
+                                         &user_pwbuf, &user_base);
+        if (ret < 0)
+            return ret;
+        if (ret > 0) {
+            struct passwd *user_clash, user_clash_pwbuf;
+            uid_t intended_uid = user_base->pw_uid + guest_domid;
+            ret = userlookup_helper_getpwuid(gc, intended_uid,
+                                             &user_clash_pwbuf, &user_clash);
+            if (ret < 0)
+                return ret;
+            if (ret > 0) {
+                LOGD(ERROR, guest_domid,
+                     "wanted to use uid %ld (%s + %d) but that is user %s !",
+                     (long)intended_uid, LIBXL_QEMU_USER_RANGE_BASE,
+                     guest_domid, user_clash->pw_name);
+                return ERROR_FAIL;
+            }
+            LOGD(DEBUG, guest_domid, "using uid %ld", (long)intended_uid);
+            flexarray_append(dm_args, "-runas");
+            flexarray_append(dm_args,
+                             GCSPRINTF("%ld:%ld", (long)intended_uid,
+                                       (long)user_base->pw_gid));
+            user = NULL; /* we have taken care of it */
+            goto end_search;
+        }
+
         user = LIBXL_QEMU_USER_SHARED;
-        ret = libxl__dm_runas_helper(gc, user);
+        ret = userlookup_helper_getpwnam(gc, user, &user_pwbuf, 0);
         if (ret < 0)
             return ret;
         if (ret > 0) {
@@ -1641,9 +1704,10 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
             goto end_search;
         }
 
-        user = NULL;
-        LOGD(DEBUG, guest_domid, "Could not find user %s, starting QEMU as root",
-             LIBXL_QEMU_USER_SHARED);
+        LOGD(ERROR, guest_domid,
+             "Could not find user %s%d or %s, cannot restrict",
+             LIBXL_QEMU_USER_BASE, guest_domid, LIBXL_QEMU_USER_SHARED);
+        return ERROR_INVAL;
 
 end_search:
         if (user != NULL && strcmp(user, "root")) {
@@ -1845,6 +1909,9 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
         guest_config->b_info.video_memkb;
     dm_config->b_info.target_memkb = dm_config->b_info.max_memkb;
 
+    dm_config->b_info.max_grant_frames = guest_config->b_info.max_grant_frames;
+    dm_config->b_info.max_maptrack_frames = 0;
+
     dm_config->b_info.u.pv.features = "";
 
     dm_config->b_info.device_model_version =
@@ -1868,13 +1935,17 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
     ret = libxl__domain_build_info_setdefault(gc, &dm_config->b_info);
     if (ret) goto out;
 
-    GCNEW(vfb);
-    GCNEW(vkb);
-    libxl__vfb_and_vkb_from_hvm_guest_config(gc, guest_config, vfb, vkb);
-    dm_config->vfbs = vfb;
-    dm_config->num_vfbs = 1;
-    dm_config->vkbs = vkb;
-    dm_config->num_vkbs = 1;
+    if (libxl_defbool_val(guest_config->b_info.u.hvm.vnc.enable)
+        || libxl_defbool_val(guest_config->b_info.u.hvm.spice.enable)
+        || libxl_defbool_val(guest_config->b_info.u.hvm.sdl.enable)) {
+        GCNEW(vfb);
+        GCNEW(vkb);
+        libxl__vfb_and_vkb_from_hvm_guest_config(gc, guest_config, vfb, vkb);
+        dm_config->vfbs = vfb;
+        dm_config->num_vfbs = 1;
+        dm_config->vkbs = vkb;
+        dm_config->num_vkbs = 1;
+    }
 
     stubdom_state->pv_kernel.path
         = libxl__abs_path(gc, "ioemu-stubdom.gz", libxl__xenfirmwaredir_path());
@@ -1959,6 +2030,7 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
     libxl__domain_build_state *const d_state = sdss->dm.build_state;
     libxl__domain_build_state *const stubdom_state = &sdss->dm_state;
     uint32_t dm_domid = sdss->pvqemu.guest_domid;
+    int need_qemu;
 
     if (ret) {
         LOGD(ERROR, guest_domid, "error connecting disk devices");
@@ -1970,17 +2042,21 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
          * called libxl_device_nic_add at this point, but qemu needs
          * the nic information to be complete.
          */
-        ret = libxl__device_nic_setdefault(gc, &dm_config->nics[i], dm_domid,
-                                           false);
+        ret = libxl__nic_devtype.set_default(gc, dm_domid, &dm_config->nics[i],
+                                             false);
         if (ret)
             goto out;
     }
-    ret = libxl__device_vfb_add(gc, dm_domid, &dm_config->vfbs[0]);
-    if (ret)
-        goto out;
-    ret = libxl__device_vkb_add(gc, dm_domid, &dm_config->vkbs[0]);
-    if (ret)
-        goto out;
+    if (dm_config->num_vfbs) {
+        ret = libxl__device_add(gc, dm_domid, &libxl__vfb_devtype,
+                                &dm_config->vfbs[0]);
+        if (ret) goto out;
+    }
+    if (dm_config->num_vkbs) {
+        ret = libxl__device_add(gc, dm_domid, &libxl__vkb_devtype,
+                                &dm_config->vkbs[0]);
+        if (ret) goto out;
+    }
 
     if (guest_config->b_info.u.hvm.serial)
         num_console++;
@@ -1988,7 +2064,6 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
     console = libxl__calloc(gc, num_console, sizeof(libxl__device_console));
 
     for (i = 0; i < num_console; i++) {
-        libxl__device device;
         console[i].devid = i;
         console[i].consback = LIBXL__CONSOLE_BACKEND_IOEMU;
         /* STUBDOM_CONSOLE_LOGGING (console 0) is for minios logging
@@ -2005,6 +2080,9 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
                 if (ret) goto out;
                 console[i].output = GCSPRINTF("file:%s", filename);
                 free(filename);
+                /* will be changed back to LIBXL__CONSOLE_BACKEND_IOEMU if qemu
+                 * will be in use */
+                console[i].consback = LIBXL__CONSOLE_BACKEND_XENCONSOLED;
                 break;
             case STUBDOM_CONSOLE_SAVE:
                 console[i].output = GCSPRINTF("file:%s",
@@ -2019,6 +2097,14 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
                 console[i].output = "pty";
                 break;
         }
+    }
+
+    need_qemu = libxl__need_xenpv_qemu(gc, dm_config);
+
+    for (i = 0; i < num_console; i++) {
+        libxl__device device;
+        if (need_qemu)
+            console[i].consback = LIBXL__CONSOLE_BACKEND_IOEMU;
         ret = libxl__device_console_add(gc, dm_domid, &console[i],
                         i == STUBDOM_CONSOLE_LOGGING ? stubdom_state : NULL,
                         &device);
@@ -2032,7 +2118,12 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
     sdss->pvqemu.build_state = &sdss->dm_state;
     sdss->pvqemu.callback = spawn_stubdom_pvqemu_cb;
 
-    libxl__spawn_local_dm(egc, &sdss->pvqemu);
+    if (!need_qemu) {
+        /* If dom0 qemu not needed, do not launch it */
+        spawn_stubdom_pvqemu_cb(egc, &sdss->pvqemu, 0);
+    } else {
+        libxl__spawn_local_dm(egc, &sdss->pvqemu);
+    }
 
     return;
 

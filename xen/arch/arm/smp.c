@@ -1,6 +1,6 @@
+#include <xen/mm.h>
 #include <asm/system.h>
 #include <asm/smp.h>
-#include <asm/cpregs.h>
 #include <asm/page.h>
 #include <asm/gic.h>
 #include <asm/flushtlb.h>

@@ -160,7 +160,8 @@ static int libxl__device_pci_add_xenstore(libxl__gc *gc, uint32_t domid, libxl_d
     rc = libxl__get_domain_configuration(gc, domid, &d_config);
     if (rc) goto out;
 
-    DEVICE_ADD(pci, pcidevs, domid, &pcidev_saved, COMPARE_PCI, &d_config);
+    device_add_domain_config(gc, &d_config, &libxl__pcidev_devtype,
+                             &pcidev_saved);
 
     rc = libxl__dm_check_start(gc, &d_config, domid);
     if (rc) goto out;
@@ -531,45 +532,33 @@ static uint16_t sysfs_dev_get_device(libxl__gc *gc, libxl_device_pci *pcidev)
     return pci_device_device;
 }
 
-typedef struct {
-    uint16_t vendor;
-    uint16_t device;
-} pci_info;
+static int sysfs_dev_get_class(libxl__gc *gc, libxl_device_pci *pcidev,
+                               unsigned long *class)
+{
+    char *pci_device_class_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/class",
+                     pcidev->domain, pcidev->bus, pcidev->dev, pcidev->func);
+    int read_items, ret = 0;
 
-static const pci_info fixup_ids[] = {
-    /* Intel HSW Classic */
-    {0x8086, 0x0402}, /* HSWGT1D, HSWD_w7 */
-    {0x8086, 0x0406}, /* HSWGT1M, HSWM_w7 */
-    {0x8086, 0x0412}, /* HSWGT2D, HSWD_w7 */
-    {0x8086, 0x0416}, /* HSWGT2M, HSWM_w7 */
-    {0x8086, 0x041E}, /* HSWGT15D, HSWD_w7 */
-    /* Intel HSW ULT */
-    {0x8086, 0x0A06}, /* HSWGT1UT, HSWM_w7 */
-    {0x8086, 0x0A16}, /* HSWGT2UT, HSWM_w7 */
-    {0x8086, 0x0A26}, /* HSWGT3UT, HSWM_w7 */
-    {0x8086, 0x0A2E}, /* HSWGT3UT28W, HSWM_w7 */
-    {0x8086, 0x0A1E}, /* HSWGT2UX, HSWM_w7 */
-    {0x8086, 0x0A0E}, /* HSWGT1ULX, HSWM_w7 */
-    /* Intel HSW CRW */
-    {0x8086, 0x0D26}, /* HSWGT3CW, HSWM_w7 */
-    {0x8086, 0x0D22}, /* HSWGT3CWDT, HSWD_w7 */
-    /* Intel HSW Server */
-    {0x8086, 0x041A}, /* HSWSVGT2, HSWD_w7 */
-    /* Intel HSW SRVR */
-    {0x8086, 0x040A}, /* HSWSVGT1, HSWD_w7 */
-    /* Intel BSW */
-    {0x8086, 0x1606}, /* BDWULTGT1, BDWM_w7 */
-    {0x8086, 0x1616}, /* BDWULTGT2, BDWM_w7 */
-    {0x8086, 0x1626}, /* BDWULTGT3, BDWM_w7 */
-    {0x8086, 0x160E}, /* BDWULXGT1, BDWM_w7 */
-    {0x8086, 0x161E}, /* BDWULXGT2, BDWM_w7 */
-    {0x8086, 0x1602}, /* BDWHALOGT1, BDWM_w7 */
-    {0x8086, 0x1612}, /* BDWHALOGT2, BDWM_w7 */
-    {0x8086, 0x1622}, /* BDWHALOGT3, BDWM_w7 */
-    {0x8086, 0x162B}, /* BDWHALO28W, BDWM_w7 */
-    {0x8086, 0x162A}, /* BDWGT3WRKS, BDWM_w7 */
-    {0x8086, 0x162D}, /* BDWGT3SRVR, BDWM_w7 */
-};
+    FILE *f = fopen(pci_device_class_path, "r");
+    if (!f) {
+        LOGE(ERROR,
+             "pci device "PCI_BDF" does not have class attribute",
+             pcidev->domain, pcidev->bus, pcidev->dev, pcidev->func);
+        ret = ERROR_FAIL;
+        goto out;
+    }
+    read_items = fscanf(f, "0x%lx\n", class);
+    fclose(f);
+    if (read_items != 1) {
+        LOGE(ERROR,
+             "cannot read class of pci device "PCI_BDF,
+             pcidev->domain, pcidev->bus, pcidev->dev, pcidev->func);
+        ret = ERROR_FAIL;
+    }
+
+out:
+    return ret;
+}
 
 /*
  * Some devices may need some ways to work well. Here like IGD,
@@ -578,24 +567,23 @@ static const pci_info fixup_ids[] = {
 bool libxl__is_igd_vga_passthru(libxl__gc *gc,
                                 const libxl_domain_config *d_config)
 {
-    unsigned int i, j, num = ARRAY_SIZE(fixup_ids);
-    uint16_t vendor, device, pt_vendor, pt_device;
+    unsigned int i;
+    uint16_t pt_vendor, pt_device;
+    unsigned long class;
 
     for (i = 0 ; i < d_config->num_pcidevs ; i++) {
         libxl_device_pci *pcidev = &d_config->pcidevs[i];
         pt_vendor = sysfs_dev_get_vendor(gc, pcidev);
         pt_device = sysfs_dev_get_device(gc, pcidev);
 
-        if (pt_vendor == 0xffff || pt_device == 0xffff)
+        if (pt_vendor == 0xffff || pt_device == 0xffff ||
+            pt_vendor != 0x8086)
             continue;
 
-        for (j = 0 ; j < num ; j++) {
-            vendor = fixup_ids[j].vendor;
-            device = fixup_ids[j].device;
-
-            if (pt_vendor == vendor &&  pt_device == device)
-                return true;
-        }
+        if (sysfs_dev_get_class(gc, pcidev, &class))
+            continue;
+        if (class == 0x030000)
+            return true;
     }
 
     return false;
@@ -1157,7 +1145,8 @@ static int libxl__device_pci_reset(libxl__gc *gc, unsigned int domain, unsigned 
     return -1;
 }
 
-int libxl__device_pci_setdefault(libxl__gc *gc, libxl_device_pci *pci)
+static int libxl__device_pci_setdefault(libxl__gc *gc, uint32_t domid,
+                                        libxl_device_pci *pci, bool hotplug)
 {
     /* We'd like to force reserve rdm specific to a device by default.*/
     if (pci->rdm_policy == LIBXL_RDM_RESERVE_POLICY_INVALID)
@@ -1213,7 +1202,7 @@ int libxl__device_pci_add(libxl__gc *gc, uint32_t domid, libxl_device_pci *pcide
         }
     }
 
-    rc = libxl__device_pci_setdefault(gc, pcidev);
+    rc = libxl__device_pci_setdefault(gc, domid, pcidev, false);
     if (rc) goto out;
 
     if (pcidev->seize && !pciback_dev_is_assigned(gc, pcidev)) {
@@ -1652,27 +1641,10 @@ int libxl__grant_vga_iomem_permission(libxl__gc *gc, const uint32_t domid,
         uint64_t vga_iomem_start = 0xa0000 >> XC_PAGE_SHIFT;
         uint32_t stubdom_domid;
         libxl_device_pci *pcidev = &d_config->pcidevs[i];
-        char *pci_device_class_path =
-            GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/class",
-                      pcidev->domain, pcidev->bus, pcidev->dev, pcidev->func);
-        int read_items;
         unsigned long pci_device_class;
 
-        FILE *f = fopen(pci_device_class_path, "r");
-        if (!f) {
-            LOGED(ERROR, domid,
-                  "pci device "PCI_BDF" does not have class attribute",
-                  pcidev->domain, pcidev->bus, pcidev->dev, pcidev->func);
+        if (sysfs_dev_get_class(gc, pcidev, &pci_device_class))
             continue;
-        }
-        read_items = fscanf(f, "0x%lx\n", &pci_device_class);
-        fclose(f);
-        if (read_items != 1) {
-            LOGED(ERROR, domid,
-                  "cannot read class of pci device "PCI_BDF,
-                  pcidev->domain, pcidev->bus, pcidev->dev, pcidev->func);
-            continue;
-        }
         if (pci_device_class != 0x030000) /* VGA class */
             continue;
 
@@ -1708,7 +1680,9 @@ static int libxl_device_pci_compare(libxl_device_pci *d1,
     return COMPARE_PCI(d1, d2);
 }
 
-DEFINE_DEVICE_TYPE_STRUCT_X(pcidev, pci);
+#define libxl__device_pci_update_devid NULL
+
+DEFINE_DEVICE_TYPE_STRUCT_X(pcidev, pci, pci);
 
 /*
  * Local variables:

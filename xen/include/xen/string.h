@@ -1,18 +1,7 @@
-#ifndef _LINUX_STRING_H_
-#define _LINUX_STRING_H_
+#ifndef __XEN_STRING_H__
+#define __XEN_STRING_H__
 
 #include <xen/types.h>	/* for size_t */
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#define __kernel_size_t size_t
-
-extern char * strpbrk(const char *,const char *);
-extern char * strsep(char **,const char *);
-extern __kernel_size_t strspn(const char *,const char *);
-
 
 /*
  * Include machine specific inline routines
@@ -29,60 +18,96 @@ extern __kernel_size_t strspn(const char *,const char *);
 #define strncat __xen_has_no_strncat__
 
 #ifndef __HAVE_ARCH_STRLCPY
-extern size_t strlcpy(char *,const char *, __kernel_size_t);
+size_t strlcpy(char *, const char *, size_t);
 #endif
+
 #ifndef __HAVE_ARCH_STRLCAT
-extern size_t strlcat(char *,const char *, __kernel_size_t);
+size_t strlcat(char *, const char *, size_t);
 #endif
+
 #ifndef __HAVE_ARCH_STRCMP
-extern int strcmp(const char *,const char *);
+int strcmp(const char *, const char *);
+#define strcmp(s1, s2) __builtin_strcmp(s1, s2)
 #endif
+
 #ifndef __HAVE_ARCH_STRNCMP
-extern int strncmp(const char *,const char *,__kernel_size_t);
+int strncmp(const char *, const char *, size_t);
+#define strncmp(s1, s2, n) __builtin_strncmp(s1, s2, n)
 #endif
+
 #ifndef __HAVE_ARCH_STRNICMP
-extern int strnicmp(const char *, const char *, __kernel_size_t);
+int strnicmp(const char *, const char *, size_t);
 #endif
+
 #ifndef __HAVE_ARCH_STRCASECMP
-extern int strcasecmp(const char *, const char *);
+int strcasecmp(const char *, const char *);
+#define strcasecmp(s1, s2) __builtin_strcasecmp(s1, s2)
 #endif
+
 #ifndef __HAVE_ARCH_STRCHR
-extern char * strchr(const char *,int);
+char *strchr(const char *, int);
+#define strchr(s1, c) __builtin_strchr(s1, c)
 #endif
+
 #ifndef __HAVE_ARCH_STRRCHR
-extern char * strrchr(const char *,int);
+char *strrchr(const char *, int);
+#define strrchr(s1, c) __builtin_strrchr(s1, c)
 #endif
+
 #ifndef __HAVE_ARCH_STRSTR
-extern char * strstr(const char *,const char *);
+char *strstr(const char *, const char *);
+#define strstr(s1, s2) __builtin_strstr(s1, s2)
 #endif
+
 #ifndef __HAVE_ARCH_STRLEN
-extern __kernel_size_t strlen(const char *);
+size_t strlen(const char *);
+#define strlen(s1) __builtin_strlen(s1)
 #endif
+
 #ifndef __HAVE_ARCH_STRNLEN
-extern __kernel_size_t strnlen(const char *,__kernel_size_t);
+size_t strnlen(const char *, size_t);
 #endif
+
+#ifndef __HAVE_ARCH_STRPBRK
+char *strpbrk(const char *, const char *);
+#endif
+
+#ifndef __HAVE_ARCH_STRSEP
+char *strsep(char **, const char *);
+#endif
+
+#ifndef __HAVE_ARCH_STRSPN
+size_t strspn(const char *, const char *);
+#endif
+
 
 #ifndef __HAVE_ARCH_MEMSET
-extern void * memset(void *,int,__kernel_size_t);
-#endif
-#ifndef __HAVE_ARCH_MEMCPY
-extern void * memcpy(void *,const void *,__kernel_size_t);
-#endif
-#ifndef __HAVE_ARCH_MEMMOVE
-extern void * memmove(void *,const void *,__kernel_size_t);
-#endif
-#ifndef __HAVE_ARCH_MEMSCAN
-extern void * memscan(void *,int,__kernel_size_t);
-#endif
-#ifndef __HAVE_ARCH_MEMCMP
-extern int memcmp(const void *,const void *,__kernel_size_t);
-#endif
-#ifndef __HAVE_ARCH_MEMCHR
-extern void * memchr(const void *,int,__kernel_size_t);
+void *memset(void *, int, size_t);
+#define memset(s, c, n) __builtin_memset(s, c, n)
 #endif
 
-#ifdef __cplusplus
-}
+#ifndef __HAVE_ARCH_MEMCPY
+void *memcpy(void *, const void *, size_t);
+#define memcpy(d, s, n) __builtin_memcpy(d, s, n)
+#endif
+
+#ifndef __HAVE_ARCH_MEMMOVE
+void *memmove(void *, const void *, size_t);
+#define memmove(d, s, n) __builtin_memmove(d, s, n)
+#endif
+
+#ifndef __HAVE_ARCH_MEMSCAN
+void *memscan(void *, int, size_t);
+#endif
+
+#ifndef __HAVE_ARCH_MEMCMP
+int memcmp(const void *, const void *, size_t);
+#define memcmp(s1, s2, n) __builtin_memcmp(s1, s2, n)
+#endif
+
+#ifndef __HAVE_ARCH_MEMCHR
+void *memchr(const void *, int, size_t);
+#define memchr(s, c, n) __builtin_memchr(s, c, n)
 #endif
 
 #define is_char_array(x) __builtin_types_compatible_p(typeof(x), char[])
@@ -97,4 +122,12 @@ extern void * memchr(const void *,int,__kernel_size_t);
     (strlcat(d, s, sizeof(d)) >= sizeof(d));    \
 })
 
-#endif /* _LINUX_STRING_H_ */
+#endif /* __XEN_STRING_H__ */
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "BSD"
+ * c-basic-offset: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

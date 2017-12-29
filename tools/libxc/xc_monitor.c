@@ -22,13 +22,13 @@
 
 #include "xc_private.h"
 
-void *xc_monitor_enable(xc_interface *xch, domid_t domain_id, uint32_t *port)
+void *xc_monitor_enable(xc_interface *xch, uint32_t domain_id, uint32_t *port)
 {
     return xc_vm_event_enable(xch, domain_id, HVM_PARAM_MONITOR_RING_PFN,
                               port);
 }
 
-int xc_monitor_disable(xc_interface *xch, domid_t domain_id)
+int xc_monitor_disable(xc_interface *xch, uint32_t domain_id)
 {
     return xc_vm_event_control(xch, domain_id,
                                XEN_VM_EVENT_DISABLE,
@@ -36,7 +36,7 @@ int xc_monitor_disable(xc_interface *xch, domid_t domain_id)
                                NULL);
 }
 
-int xc_monitor_resume(xc_interface *xch, domid_t domain_id)
+int xc_monitor_resume(xc_interface *xch, uint32_t domain_id)
 {
     return xc_vm_event_control(xch, domain_id,
                                XEN_VM_EVENT_RESUME,
@@ -44,7 +44,7 @@ int xc_monitor_resume(xc_interface *xch, domid_t domain_id)
                                NULL);
 }
 
-int xc_monitor_get_capabilities(xc_interface *xch, domid_t domain_id,
+int xc_monitor_get_capabilities(xc_interface *xch, uint32_t domain_id,
                                 uint32_t *capabilities)
 {
     int rc;
@@ -68,9 +68,9 @@ int xc_monitor_get_capabilities(xc_interface *xch, domid_t domain_id,
     return 0;
 }
 
-int xc_monitor_write_ctrlreg(xc_interface *xch, domid_t domain_id,
+int xc_monitor_write_ctrlreg(xc_interface *xch, uint32_t domain_id,
                              uint16_t index, bool enable, bool sync,
-                             bool onchangeonly)
+                             uint64_t bitmask, bool onchangeonly)
 {
     DECLARE_DOMCTL;
 
@@ -82,11 +82,14 @@ int xc_monitor_write_ctrlreg(xc_interface *xch, domid_t domain_id,
     domctl.u.monitor_op.u.mov_to_cr.index = index;
     domctl.u.monitor_op.u.mov_to_cr.sync = sync;
     domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
+    domctl.u.monitor_op.u.mov_to_cr.bitmask = bitmask;
+    domctl.u.monitor_op.u.mov_to_cr.pad1 = 0;
+    domctl.u.monitor_op.u.mov_to_cr.pad2 = 0;
 
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, uint32_t msr,
+int xc_monitor_mov_to_msr(xc_interface *xch, uint32_t domain_id, uint32_t msr,
                           bool enable)
 {
     DECLARE_DOMCTL;
@@ -101,7 +104,7 @@ int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, uint32_t msr,
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_software_breakpoint(xc_interface *xch, domid_t domain_id,
+int xc_monitor_software_breakpoint(xc_interface *xch, uint32_t domain_id,
                                    bool enable)
 {
     DECLARE_DOMCTL;
@@ -115,7 +118,7 @@ int xc_monitor_software_breakpoint(xc_interface *xch, domid_t domain_id,
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id,
+int xc_monitor_singlestep(xc_interface *xch, uint32_t domain_id,
                           bool enable)
 {
     DECLARE_DOMCTL;
@@ -129,8 +132,22 @@ int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id,
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_guest_request(xc_interface *xch, domid_t domain_id, bool enable,
-                             bool sync)
+int xc_monitor_descriptor_access(xc_interface *xch, uint32_t domain_id,
+                                 bool enable)
+{
+    DECLARE_DOMCTL;
+
+    domctl.cmd = XEN_DOMCTL_monitor_op;
+    domctl.domain = domain_id;
+    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
+                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
+    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_DESC_ACCESS;
+
+    return do_domctl(xch, &domctl);
+}
+
+int xc_monitor_guest_request(xc_interface *xch, uint32_t domain_id, bool enable,
+                             bool sync, bool allow_userspace)
 {
     DECLARE_DOMCTL;
 
@@ -140,11 +157,12 @@ int xc_monitor_guest_request(xc_interface *xch, domid_t domain_id, bool enable,
                                     : XEN_DOMCTL_MONITOR_OP_DISABLE;
     domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST;
     domctl.u.monitor_op.u.guest_request.sync = sync;
+    domctl.u.monitor_op.u.guest_request.allow_userspace = enable ? allow_userspace : false;
 
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_emulate_each_rep(xc_interface *xch, domid_t domain_id,
+int xc_monitor_emulate_each_rep(xc_interface *xch, uint32_t domain_id,
                                 bool enable)
 {
     DECLARE_DOMCTL;
@@ -157,7 +175,7 @@ int xc_monitor_emulate_each_rep(xc_interface *xch, domid_t domain_id,
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_debug_exceptions(xc_interface *xch, domid_t domain_id,
+int xc_monitor_debug_exceptions(xc_interface *xch, uint32_t domain_id,
                                 bool enable, bool sync)
 {
     DECLARE_DOMCTL;
@@ -172,7 +190,7 @@ int xc_monitor_debug_exceptions(xc_interface *xch, domid_t domain_id,
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_cpuid(xc_interface *xch, domid_t domain_id, bool enable)
+int xc_monitor_cpuid(xc_interface *xch, uint32_t domain_id, bool enable)
 {
     DECLARE_DOMCTL;
 
@@ -185,7 +203,7 @@ int xc_monitor_cpuid(xc_interface *xch, domid_t domain_id, bool enable)
     return do_domctl(xch, &domctl);
 }
 
-int xc_monitor_privileged_call(xc_interface *xch, domid_t domain_id,
+int xc_monitor_privileged_call(xc_interface *xch, uint32_t domain_id,
                                bool enable)
 {
     DECLARE_DOMCTL;
@@ -195,6 +213,20 @@ int xc_monitor_privileged_call(xc_interface *xch, domid_t domain_id,
     domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
                                     : XEN_DOMCTL_MONITOR_OP_DISABLE;
     domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_PRIVILEGED_CALL;
+
+    return do_domctl(xch, &domctl);
+}
+
+int xc_monitor_emul_unimplemented(xc_interface *xch, uint32_t domain_id,
+                                  bool enable)
+{
+    DECLARE_DOMCTL;
+
+    domctl.cmd = XEN_DOMCTL_monitor_op;
+    domctl.domain = domain_id;
+    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
+                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
+    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_EMUL_UNIMPLEMENTED;
 
     return do_domctl(xch, &domctl);
 }

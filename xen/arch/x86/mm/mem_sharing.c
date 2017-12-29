@@ -452,7 +452,7 @@ static int audit(void)
         }
 
         /* Check if the MFN has correct type, owner and handle. */ 
-        if ( !(pg->u.inuse.type_info & PGT_shared_page) )
+        if ( (pg->u.inuse.type_info & PGT_type_mask) != PGT_shared_page )
         {
            MEM_SHARING_DEBUG("mfn %lx in audit list, but not PGT_shared_page (%lx)!\n",
                               mfn_x(mfn), pg->u.inuse.type_info & PGT_type_mask);
@@ -563,7 +563,7 @@ int mem_sharing_notify_enomem(struct domain *d, unsigned long gfn,
     };
 
     if ( (rc = __vm_event_claim_slot(d, 
-                        &d->vm_event->share, allow_sleep)) < 0 )
+                        d->vm_event_share, allow_sleep)) < 0 )
         return rc;
 
     if ( v->domain == d )
@@ -572,7 +572,7 @@ int mem_sharing_notify_enomem(struct domain *d, unsigned long gfn,
         vm_event_vcpu_pause(v);
     }
 
-    vm_event_put_request(d, &d->vm_event->share, &req);
+    vm_event_put_request(d, d->vm_event_share, &req);
 
     return 0;
 }
@@ -1052,7 +1052,8 @@ int mem_sharing_add_to_physmap(struct domain *sd, unsigned long sgfn, shr_handle
         goto err_unlock;
     }
 
-    ret = p2m_set_entry(p2m, cgfn, smfn, PAGE_ORDER_4K, p2m_ram_shared, a);
+    ret = p2m_set_entry(p2m, _gfn(cgfn), smfn, PAGE_ORDER_4K,
+                        p2m_ram_shared, a);
 
     /* Tempted to turn this into an assert */
     if ( ret )
@@ -1105,7 +1106,6 @@ int __mem_sharing_unshare_page(struct domain *d,
     p2m_type_t p2mt;
     mfn_t mfn;
     struct page_info *page, *old_page;
-    void *s, *t;
     int last_gfn;
     gfn_info_t *gfn_info = NULL;
    
@@ -1184,11 +1184,7 @@ int __mem_sharing_unshare_page(struct domain *d,
         return -ENOMEM;
     }
 
-    s = map_domain_page(_mfn(__page_to_mfn(old_page)));
-    t = map_domain_page(_mfn(__page_to_mfn(page)));
-    memcpy(t, s, PAGE_SIZE);
-    unmap_domain_page(s);
-    unmap_domain_page(t);
+    copy_domain_page(page_to_mfn(page), page_to_mfn(old_page));
 
     BUG_ON(set_shared_p2m_entry(d, gfn, page_to_mfn(page)));
     mem_sharing_gfn_destroy(old_page, d, gfn_info);
@@ -1234,7 +1230,7 @@ int relinquish_shared_pages(struct domain *d)
 
         if ( atomic_read(&d->shr_pages) == 0 )
             break;
-        mfn = p2m->get_entry(p2m, gfn, &t, &a, 0, NULL, NULL);
+        mfn = p2m->get_entry(p2m, _gfn(gfn), &t, &a, 0, NULL, NULL);
         if ( mfn_valid(mfn) && (t == p2m_ram_shared) )
         {
             /* Does not fail with ENOMEM given the DESTROY flag */
@@ -1243,7 +1239,7 @@ int relinquish_shared_pages(struct domain *d)
             /* Clear out the p2m entry so no one else may try to
              * unshare.  Must succeed: we just read the old entry and
              * we hold the p2m lock. */
-            set_rc = p2m->set_entry(p2m, gfn, _mfn(0), PAGE_ORDER_4K,
+            set_rc = p2m->set_entry(p2m, _gfn(gfn), _mfn(0), PAGE_ORDER_4K,
                                     p2m_invalid, p2m_access_rwx, -1);
             ASSERT(set_rc == 0);
             count += 0x10;
@@ -1606,7 +1602,7 @@ out:
     return rc;
 }
 
-int mem_sharing_domctl(struct domain *d, xen_domctl_mem_sharing_op_t *mec)
+int mem_sharing_domctl(struct domain *d, struct xen_domctl_mem_sharing_op *mec)
 {
     int rc;
 

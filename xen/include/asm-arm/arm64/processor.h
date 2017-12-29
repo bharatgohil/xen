@@ -3,6 +3,8 @@
 
 #include <xen/stringify.h>
 
+#include <asm/arm64/sysregs.h>
+
 #ifndef __ASSEMBLY__
 
 /* Anonymous union includes both 32- and 64-bit names (e.g., r0/x0). */
@@ -66,8 +68,7 @@ struct cpu_user_regs
     /* Return address and mode */
     __DECL_REG(pc,           pc32);             /* ELR_EL2 */
     uint32_t cpsr;                              /* SPSR_EL2 */
-
-    uint32_t pad0; /* Align end of kernel frame. */
+    uint32_t hsr;                               /* ESR_EL2 */
 
     /* Outer guest frame only from here on... */
 

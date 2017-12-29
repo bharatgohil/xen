@@ -43,7 +43,7 @@ static void helper_done(libxl__egc *egc, libxl__save_helper_state *shs);
 
 void libxl__xc_domain_restore(libxl__egc *egc, libxl__domain_create_state *dcs,
                               libxl__save_helper_state *shs,
-                              int hvm, int pae, int superpages)
+                              int hvm, int pae)
 {
     STATE_AO_GC(dcs->ao);
 
@@ -61,7 +61,7 @@ void libxl__xc_domain_restore(libxl__egc *egc, libxl__domain_create_state *dcs,
         state->store_port,
         state->store_domid, state->console_port,
         state->console_domid,
-        hvm, pae, superpages,
+        hvm, pae,
         cbflags, dcs->restore_params.checkpointed_stream,
     };
 
@@ -89,8 +89,8 @@ void libxl__xc_domain_save(libxl__egc *egc, libxl__domain_save_state *dss,
         libxl__srm_callout_enumcallbacks_save(&shs->callbacks.save.a);
 
     const unsigned long argnums[] = {
-        dss->domid, 0, 0, dss->xcflags, dss->hvm,
-        cbflags, dss->checkpointed_stream,
+        dss->domid, dss->xcflags, dss->hvm, cbflags,
+        dss->checkpointed_stream,
     };
 
     shs->ao = ao;

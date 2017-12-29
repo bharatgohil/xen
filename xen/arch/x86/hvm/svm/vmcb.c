@@ -50,21 +50,6 @@ void free_vmcb(struct vmcb_struct *vmcb)
     free_xenheap_page(vmcb);
 }
 
-struct host_save_area *alloc_host_save_area(void)
-{
-    struct host_save_area *hsa;
-
-    hsa = alloc_xenheap_page();
-    if ( hsa == NULL )
-    {
-        printk(XENLOG_WARNING "Warning: failed to allocate hsa.\n");
-        return NULL;
-    }
-
-    clear_page(hsa);
-    return hsa;
-}
-
 /* This function can directly access fields which are covered by clean bits. */
 static int construct_vmcb(struct vcpu *v)
 {
@@ -158,12 +143,12 @@ static int construct_vmcb(struct vcpu *v)
     vmcb->gs.base = 0;
 
     /* Guest segment AR bytes. */
-    vmcb->es.attr.bytes = 0xc93; /* read/write, accessed */
-    vmcb->ss.attr.bytes = 0xc93;
-    vmcb->ds.attr.bytes = 0xc93;
-    vmcb->fs.attr.bytes = 0xc93;
-    vmcb->gs.attr.bytes = 0xc93;
-    vmcb->cs.attr.bytes = 0xc9b; /* exec/read, accessed */
+    vmcb->es.attr = 0xc93; /* read/write, accessed */
+    vmcb->ss.attr = 0xc93;
+    vmcb->ds.attr = 0xc93;
+    vmcb->fs.attr = 0xc93;
+    vmcb->gs.attr = 0xc93;
+    vmcb->cs.attr = 0xc9b; /* exec/read, accessed */
 
     /* Guest IDT. */
     vmcb->idtr.base = 0;
@@ -177,10 +162,10 @@ static int construct_vmcb(struct vcpu *v)
     vmcb->ldtr.sel = 0;
     vmcb->ldtr.base = 0;
     vmcb->ldtr.limit = 0;
-    vmcb->ldtr.attr.bytes = 0;
+    vmcb->ldtr.attr = 0;
 
     /* Guest TSS. */
-    vmcb->tr.attr.bytes = 0x08b; /* 32-bit TSS (busy) */
+    vmcb->tr.attr = 0x08b; /* 32-bit TSS (busy) */
     vmcb->tr.base = 0;
     vmcb->tr.limit = 0xff;
 
@@ -308,6 +293,22 @@ static void vmcb_dump(unsigned char ch)
 void __init setup_vmcb_dump(void)
 {
     register_keyhandler('v', vmcb_dump, "dump AMD-V VMCBs", 1);
+}
+
+static void __init __maybe_unused build_assertions(void)
+{
+    struct segment_register sreg;
+
+    /* Check struct segment_register against the VMCB segment layout. */
+    BUILD_BUG_ON(sizeof(sreg)       != 16);
+    BUILD_BUG_ON(sizeof(sreg.sel)   != 2);
+    BUILD_BUG_ON(sizeof(sreg.attr)  != 2);
+    BUILD_BUG_ON(sizeof(sreg.limit) != 4);
+    BUILD_BUG_ON(sizeof(sreg.base)  != 8);
+    BUILD_BUG_ON(offsetof(struct segment_register, sel)   != 0);
+    BUILD_BUG_ON(offsetof(struct segment_register, attr)  != 2);
+    BUILD_BUG_ON(offsetof(struct segment_register, limit) != 4);
+    BUILD_BUG_ON(offsetof(struct segment_register, base)  != 8);
 }
 
 /*

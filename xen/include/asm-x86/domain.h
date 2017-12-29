@@ -17,7 +17,7 @@
 #define is_pv_32bit_vcpu(v)    (is_pv_32bit_domain((v)->domain))
 
 #define is_hvm_pv_evtchn_domain(d) (is_hvm_domain(d) && \
-        d->arch.hvm_domain.irq.callback_via_type == HVMIRQ_callback_vector)
+        (d)->arch.hvm_domain.irq->callback_via_type == HVMIRQ_callback_vector)
 #define is_hvm_pv_evtchn_vcpu(v) (is_hvm_pv_evtchn_domain(v->domain))
 #define is_domain_direct_mapped(d) ((void)(d), 0)
 
@@ -76,6 +76,8 @@ void mapcache_override_current(struct vcpu *);
 
 /* x86/64: toggle guest between kernel and user modes. */
 void toggle_guest_mode(struct vcpu *);
+/* x86/64: toggle guest page tables between kernel and user modes. */
+void toggle_guest_pt(struct vcpu *);
 
 /*
  * Initialise a hypercall-transfer page. The given pointer must be mapped
@@ -356,8 +358,9 @@ struct arch_domain
      */
     uint8_t x87_fip_width;
 
-    /* CPUID Policy. */
+    /* CPUID and MSR policy objects. */
     struct cpuid_policy *cpuid;
+    struct msr_domain_policy *msr;
 
     struct PITState vpit;
 
@@ -396,15 +399,19 @@ struct arch_domain
 
     /* Arch-specific monitor options */
     struct {
-        unsigned int write_ctrlreg_enabled       : 4;
-        unsigned int write_ctrlreg_sync          : 4;
-        unsigned int write_ctrlreg_onchangeonly  : 4;
-        unsigned int singlestep_enabled          : 1;
-        unsigned int software_breakpoint_enabled : 1;
-        unsigned int debug_exception_enabled     : 1;
-        unsigned int debug_exception_sync        : 1;
-        unsigned int cpuid_enabled               : 1;
+        unsigned int write_ctrlreg_enabled                                 : 4;
+        unsigned int write_ctrlreg_sync                                    : 4;
+        unsigned int write_ctrlreg_onchangeonly                            : 4;
+        unsigned int singlestep_enabled                                    : 1;
+        unsigned int software_breakpoint_enabled                           : 1;
+        unsigned int debug_exception_enabled                               : 1;
+        unsigned int debug_exception_sync                                  : 1;
+        unsigned int cpuid_enabled                                         : 1;
+        unsigned int descriptor_access_enabled                             : 1;
+        unsigned int guest_request_userspace_enabled                       : 1;
+        unsigned int emul_unimplemented_enabled                            : 1;
         struct monitor_msr_bitmap *msr_bitmap;
+        uint64_t write_ctrlreg_mask[4];
     } monitor;
 
     /* Mem_access emulation control */
@@ -430,9 +437,10 @@ struct arch_domain
 
 #define gdt_ldt_pt_idx(v) \
       ((v)->vcpu_id >> (PAGETABLE_ORDER - GDT_LDT_VCPU_SHIFT))
-#define gdt_ldt_ptes(d, v) \
-    ((d)->arch.pv_domain.gdt_ldt_l1tab[gdt_ldt_pt_idx(v)] + \
+#define pv_gdt_ptes(v) \
+    ((v)->domain->arch.pv_domain.gdt_ldt_l1tab[gdt_ldt_pt_idx(v)] + \
      (((v)->vcpu_id << GDT_LDT_VCPU_SHIFT) & (L1_PAGETABLE_ENTRIES - 1)))
+#define pv_ldt_ptes(v) (pv_gdt_ptes(v) + 16)
 
 struct pv_vcpu
 {
@@ -526,6 +534,8 @@ struct arch_vcpu
     pagetable_t guest_table_user;       /* (MFN) x86/64 user-space pagetable */
     pagetable_t guest_table;            /* (MFN) guest notion of cr3 */
     struct page_info *old_guest_table;  /* partially destructed pagetable */
+    struct page_info *old_guest_ptpg;   /* containing page table of the */
+                                        /* former, if any */
     /* guest_table holds a ref to the page, and also a type-count unless
      * shadow refcounts are in use */
     pagetable_t shadow_table[4];        /* (MFN) shadow(s) of guest */
@@ -552,9 +562,6 @@ struct arch_vcpu
      * and thus should be saved/restored. */
     bool_t nonlazy_xstate_used;
 
-    /* Has the guest enabled CPUID faulting? */
-    bool cpuid_faulting;
-
     /*
      * The SMAP check policy when updating runstate_guest(v) and the
      * secondary system time.
@@ -571,6 +578,8 @@ struct arch_vcpu
     XEN_GUEST_HANDLE(vcpu_time_info_t) time_info_guest;
 
     struct arch_vm_event *vm_event;
+
+    struct msr_vcpu_policy *msr;
 
     struct {
         bool next_interrupt_enabled;
@@ -590,9 +599,9 @@ void update_guest_memory_policy(struct vcpu *v,
 #define hvm_vmx         hvm_vcpu.u.vmx
 #define hvm_svm         hvm_vcpu.u.svm
 
-bool_t update_runstate_area(struct vcpu *);
-bool_t update_secondary_system_time(struct vcpu *,
-                                    struct vcpu_time_info *);
+bool update_runstate_area(struct vcpu *);
+bool update_secondary_system_time(struct vcpu *,
+                                  struct vcpu_time_info *);
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
@@ -649,6 +658,17 @@ static inline void pv_inject_page_fault(int errcode, unsigned long cr2)
         .type = X86_EVENTTYPE_HW_EXCEPTION,
         .error_code = errcode,
         .cr2 = cr2,
+    };
+
+    pv_inject_event(&event);
+}
+
+static inline void pv_inject_sw_interrupt(unsigned int vector)
+{
+    const struct x86_event event = {
+        .vector = vector,
+        .type = X86_EVENTTYPE_SW_INTERRUPT,
+        .error_code = X86_EVENT_NO_EC,
     };
 
     pv_inject_event(&event);

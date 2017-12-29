@@ -87,7 +87,8 @@ static void __init efi_arch_relocate_image(unsigned long delta)
             case PE_BASE_RELOC_DIR64:
                 if ( in_page_tables(addr) )
                     blexit(L"Unexpected relocation type");
-                *(u64 *)addr += delta;
+                if ( delta )
+                    *(u64 *)addr += delta;
                 break;
             default:
                 blexit(L"Unsupported relocation type");
@@ -662,9 +663,9 @@ static void __init efi_arch_load_addr_check(EFI_LOADED_IMAGE *loaded_image)
     trampoline_xen_phys_start = xen_phys_start;
 }
 
-static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
+static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 {
-    return 1; /* x86 always uses a config file */
+    return true; /* x86 always uses a config file */
 }
 
 static void efi_arch_flush_dcache_area(const void *vaddr, UINTN size) { }

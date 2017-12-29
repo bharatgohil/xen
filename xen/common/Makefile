@@ -40,6 +40,7 @@ obj-$(CONFIG_SCHED_ARINC653) += sched_arinc653.o
 obj-$(CONFIG_SCHED_CREDIT) += sched_credit.o
 obj-$(CONFIG_SCHED_CREDIT2) += sched_credit2.o
 obj-$(CONFIG_SCHED_RTDS) += sched_rt.o
+obj-$(CONFIG_SCHED_NULL) += sched_null.o
 obj-y += schedule.o
 obj-y += shutdown.o
 obj-y += softirq.o
@@ -73,9 +74,8 @@ tmem-y := tmem.o tmem_xen.o tmem_control.o
 tmem-$(CONFIG_COMPAT) += compat/tmem_xen.o
 obj-$(CONFIG_TMEM) += $(tmem-y)
 
-subdir-$(CONFIG_X86) += hvm
-
 subdir-$(CONFIG_GCOV) += gcov
+subdir-$(CONFIG_UBSAN) += ubsan
 
 subdir-y += libelf
 subdir-$(CONFIG_HAS_DEVICE_TREE) += libfdt

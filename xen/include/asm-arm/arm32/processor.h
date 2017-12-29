@@ -1,6 +1,8 @@
 #ifndef __ASM_ARM_ARM32_PROCESSOR_H
 #define __ASM_ARM_ARM32_PROCESSOR_H
 
+#include <asm/cpregs.h>
+
 #define ACTLR_CAXX_SMP      (1<<6)
 
 #ifndef __ASSEMBLY__
@@ -37,7 +39,7 @@ struct cpu_user_regs
         uint32_t pc, pc32;
     };
     uint32_t cpsr; /* Return mode */
-    uint32_t pad0; /* Doubleword-align the kernel half of the frame */
+    uint32_t hsr;  /* Exception Syndrome */
 
     /* Outer guest frame only from here on... */
 
@@ -55,16 +57,6 @@ struct cpu_user_regs
 
     uint32_t pad1; /* Doubleword-align the user half of the frame */
 };
-
-/* Functions for pending virtual abort checking window. */
-void abort_guest_exit_start(void);
-void abort_guest_exit_end(void);
-
-#define VABORT_GEN_BY_GUEST(r)  \
-( \
-    ( (unsigned long)abort_guest_exit_start == (r)->pc ) || \
-    ( (unsigned long)abort_guest_exit_end == (r)->pc ) \
-)
 
 #endif
 

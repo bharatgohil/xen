@@ -70,9 +70,6 @@ int is_igd_vt_enabled_quirk(void)
 {
     u16 ggc;
 
-    if ( !iommu_igfx )
-        return 0;
-
     if ( !IS_ILK(ioh_id) )
         return 1;
 
@@ -250,11 +247,12 @@ void vtd_ops_postamble_quirk(struct iommu* iommu)
     }
 }
 
-static void __init parse_snb_timeout(const char *s)
+static int __init parse_snb_timeout(const char *s)
 {
     int t;
+    const char *q = NULL;
 
-    t = parse_bool(s);
+    t = parse_bool(s, NULL);
     if ( t < 0 )
     {
         if ( *s == '\0' )
@@ -262,13 +260,13 @@ static void __init parse_snb_timeout(const char *s)
         else if ( strcmp(s, "cap") == 0 )
             t = SNB_IGD_TIMEOUT;
         else
-            t = strtoul(s, NULL, 0);
+            t = strtoul(s, &q, 0);
     }
     else
         t = t ? SNB_IGD_TIMEOUT_LEGACY : 0;
     snb_igd_timeout = MILLISECS(t);
 
-    return;
+    return (q && *q) ? -EINVAL : 0;
 }
 custom_param("snb_igd_quirk", parse_snb_timeout);
 

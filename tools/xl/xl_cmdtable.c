@@ -133,7 +133,7 @@ struct cmd_spec cmd_table[] = {
       &main_console, 0, 0,
       "Attach to domain's console",
       "[options] <Domain>\n"
-      "-t <type>       console type, pv or serial\n"
+      "-t <type>       console type, pv , serial or vuart\n"
       "-n <number>     console number"
     },
     { "vncviewer",
@@ -265,6 +265,7 @@ struct cmd_spec cmd_table[] = {
       "[-d <Domain> [-w[=WEIGHT]]] [-p CPUPOOL]",
       "-d DOMAIN, --domain=DOMAIN     Domain to modify\n"
       "-w WEIGHT, --weight=WEIGHT     Weight (int)\n"
+      "-c CAP,    --cap=CAP           Cap (int)\n"
       "-s         --schedparam        Query / modify scheduler parameters\n"
       "-r RLIMIT, --ratelimit_us=RLIMIT Set the scheduling rate limit, in microseconds\n"
       "-p CPUPOOL, --cpupool=CPUPOOL  Restrict output to CPUPOOL"
@@ -272,12 +273,13 @@ struct cmd_spec cmd_table[] = {
     { "sched-rtds",
       &main_sched_rtds, 0, 1,
       "Get/set rtds scheduler parameters",
-      "[-d <Domain> [-v[=VCPUID/all]] [-p[=PERIOD]] [-b[=BUDGET]]]",
+      "[-d <Domain> [-v[=VCPUID/all]] [-p[=PERIOD]] [-b[=BUDGET]] [-e[=Extratime]]]",
       "-d DOMAIN, --domain=DOMAIN     Domain to modify\n"
       "-v VCPUID/all, --vcpuid=VCPUID/all    VCPU to modify or output;\n"
       "               Using '-v all' to modify/output all vcpus\n"
       "-p PERIOD, --period=PERIOD     Period (us)\n"
       "-b BUDGET, --budget=BUDGET     Budget (us)\n"
+      "-e Extratime, --extratime=Extratime Extratime (1=yes, 0=no)\n"
     },
     { "domid",
       &main_domid, 0, 0,
@@ -308,6 +310,11 @@ struct cmd_spec cmd_table[] = {
       &main_debug_keys, 0, 1,
       "Send debug keys to Xen",
       "<Keys>",
+    },
+    { "set-parameters",
+      &main_set_parameters, 0, 1,
+      "Set hypervisor parameters",
+      "<Params>",
     },
     { "dmesg",
       &main_dmesg, 0, 0,
@@ -372,6 +379,25 @@ struct cmd_spec cmd_table[] = {
       "Destroy a domain's virtual TPM device",
       "<Domain> <DevId|uuid>",
     },
+    { "vdispl-attach",
+      &main_vdisplattach, 1, 1,
+      "Create a new virtual display device",
+      "<Domain> [backend=<BackDomain>] [be-alloc=<BackAlloc>] [connectors='<Connectors>']",
+      "    BackAlloc  - set to 1 to if backend allocates display buffers\n"
+      "    Connectors - list of connector's description in ID:WxH format,\n"
+      "                 where: ID - unique connector ID, W - connector width,\n"
+      "                 H - connector height: connectors='id0:800x600;id1:1024x768'\n"
+    },
+    { "vdispl-list",
+      &main_vdispllist, 0, 0,
+      "List virtual display devices for a domain",
+      "<Domain(s)>",
+    },
+    { "vdispl-detach",
+      &main_vdispldetach, 0, 1,
+      "Destroy a domain's virtual display device",
+      "<Domain> <DevId>",
+    },
     { "uptime",
       &main_uptime, 0, 0,
       "Print uptime for all/some domains",
@@ -416,7 +442,7 @@ struct cmd_spec cmd_table[] = {
       "  -a                             Authenticate for all tmem pools\n"
       "  -u UUID                        Specify uuid\n"
       "                                 (abcdef01-2345-6789-1234-567890abcdef)\n"
-      "  -A AUTH                        0=auth,1=deauth",
+      "  -A AUTH                        0=deauth,1=auth",
     },
     { "tmem-freeable",
       &main_tmem_freeable, 0, 0,
@@ -517,7 +543,7 @@ struct cmd_spec cmd_table[] = {
       "-F                      Run in the foreground.\n"
       "-p, --pidfile [FILE]    Write PID to pidfile when daemonizing.",
     },
-#ifdef LIBXL_HAVE_PSR_CMT
+#if defined(__i386__) || defined(__x86_64__)
     { "psr-hwinfo",
       &main_psr_hwinfo, 0, 1,
       "Show hardware information for Platform Shared Resource",
@@ -544,22 +570,21 @@ struct cmd_spec cmd_table[] = {
       "\"total-mem-bandwidth\":     Show total memory bandwidth(KB/s)\n"
       "\"local-mem-bandwidth\":     Show local memory bandwidth(KB/s)\n",
     },
-#endif
-#ifdef LIBXL_HAVE_PSR_CAT
-    { "psr-cat-cbm-set",
+    { "psr-cat-set",
       &main_psr_cat_cbm_set, 0, 1,
       "Set cache capacity bitmasks(CBM) for a domain",
       "[options] <Domain> <CBM>",
       "-s <socket>       Specify the socket to process, otherwise all sockets are processed\n"
+      "-l <level>        Specify the cache level to process, otherwise L3 cache is processed\n"
       "-c                Set code CBM if CDP is supported\n"
       "-d                Set data CBM if CDP is supported\n"
     },
     { "psr-cat-show",
       &main_psr_cat_show, 0, 1,
       "Show Cache Allocation Technology information",
-      "<Domain>",
+      "[options] <Domain>",
+      "-l <level>        Specify the cache level to process, otherwise L3 cache is processed\n"
     },
-
 #endif
     { "usbctrl-attach",
       &main_usbctrl_attach, 0, 1,

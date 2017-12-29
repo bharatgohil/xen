@@ -13,8 +13,6 @@
  * Copyright (C) 1997, 1998, 1999, 2000 Ingo Molnar
  */
 
-#ifdef CONFIG_X86_IO_APIC
-
 #define IO_APIC_BASE(idx) \
 		((volatile int *)(__fix_to_virt(FIX_IO_APIC_BASE_0 + idx) \
 		+ (mp_ioapics[idx].mpc_apicaddr & ~PAGE_MASK)))
@@ -127,6 +125,9 @@ struct __packed IO_APIC_route_entry {
 /* I/O APIC entries */
 extern struct mpc_config_ioapic mp_ioapics[MAX_IO_APICS];
 
+/* Base GSI for this IO APIC */
+unsigned int io_apic_gsi_base(unsigned int apic);
+
 /* Only need to remap ioapic RTE (reg: 10~3Fh) */
 #define ioapic_reg_remapped(reg) (iommu_intremap && ((reg) >= 0x10))
 
@@ -168,9 +169,9 @@ static inline void io_apic_modify(unsigned int apic, unsigned int reg, unsigned 
 }
 
 /* 1 if "noapic" boot option passed */
-extern bool_t skip_ioapic_setup;
-extern bool_t ioapic_ack_new;
-extern bool_t ioapic_ack_forced;
+extern bool skip_ioapic_setup;
+extern bool ioapic_ack_new;
+extern bool ioapic_ack_forced;
 
 extern int io_apic_get_unique_id (int ioapic, int apic_id);
 extern int io_apic_get_version (int ioapic);
@@ -185,9 +186,9 @@ extern void ioapic_resume(void);
 extern void dump_ioapic_irq_info(void);
 
 extern struct IO_APIC_route_entry __ioapic_read_entry(
-    unsigned int apic, unsigned int pin, bool_t raw);
+    unsigned int apic, unsigned int pin, bool raw);
 void __ioapic_write_entry(
-    unsigned int apic, unsigned int pin, bool_t raw,
+    unsigned int apic, unsigned int pin, bool raw,
     struct IO_APIC_route_entry);
 
 extern struct IO_APIC_route_entry **alloc_ioapic_entries(void);
@@ -195,12 +196,6 @@ extern void free_ioapic_entries(struct IO_APIC_route_entry **ioapic_entries);
 extern int save_IO_APIC_setup(struct IO_APIC_route_entry **ioapic_entries);
 extern void mask_IO_APIC_setup(struct IO_APIC_route_entry **ioapic_entries);
 extern int restore_IO_APIC_setup(struct IO_APIC_route_entry **ioapic_entries);
-
-#else  /* !CONFIG_X86_IO_APIC */
-static inline void init_ioapic_mappings(void) {}
-static inline void ioapic_suspend(void) {}
-static inline void ioapic_resume(void) {}
-#endif
 
 unsigned highest_gsi(void);
 

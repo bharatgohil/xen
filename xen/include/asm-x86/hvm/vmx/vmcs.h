@@ -26,6 +26,7 @@ extern void setup_vmcs_dump(void);
 extern int  vmx_cpu_up_prepare(unsigned int cpu);
 extern void vmx_cpu_dead(unsigned int cpu);
 extern int  vmx_cpu_up(void);
+extern int  _vmx_cpu_up(bool bsp);
 extern void vmx_cpu_down(void);
 
 struct vmcs_struct {
@@ -62,6 +63,18 @@ struct vmx_domain {
     unsigned long apic_access_mfn;
     /* VMX_DOMAIN_* */
     unsigned int status;
+};
+
+/*
+ * Layout of the MSR bitmap, as interpreted by hardware:
+ *  - *_low  covers MSRs 0 to 0x1fff
+ *  - *_ligh covers MSRs 0xc0000000 to 0xc0001fff
+ */
+struct vmx_msr_bitmap {
+    unsigned long read_low  [0x2000 / BITS_PER_LONG];
+    unsigned long read_high [0x2000 / BITS_PER_LONG];
+    unsigned long write_low [0x2000 / BITS_PER_LONG];
+    unsigned long write_high[0x2000 / BITS_PER_LONG];
 };
 
 struct pi_desc {
@@ -116,7 +129,7 @@ struct arch_vmx_struct {
     uint64_t             cstar;
     uint64_t             sfmask;
 
-    unsigned long       *msr_bitmap;
+    struct vmx_msr_bitmap *msr_bitmap;
     unsigned int         msr_count;
     struct vmx_msr_entry *msr_area;
     unsigned int         host_msr_count;
@@ -136,7 +149,7 @@ struct arch_vmx_struct {
     /* Are we emulating rather than VMENTERing? */
     uint8_t              vmx_emulate;
 
-    bool                 lbr_tsx_fixup_enabled;
+    uint8_t              lbr_fixup_enabled;
 
     /* Bitmask of segments that we can't safely use in virtual 8086 mode */
     uint16_t             vm86_segment_mask;
@@ -274,6 +287,8 @@ extern u64 vmx_ept_vpid_cap;
     (vmx_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS)
 #define cpu_has_vmx_ept \
     (vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_EPT)
+#define cpu_has_vmx_dt_exiting \
+    (vmx_secondary_exec_control & SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING)
 #define cpu_has_vmx_vpid \
     (vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VPID)
 #define cpu_has_monitor_trap_flag \
@@ -496,9 +511,6 @@ enum vmcs_field {
 
 #define VMCS_VPID_WIDTH 16
 
-#define MSR_TYPE_R 1
-#define MSR_TYPE_W 2
-
 #define VMX_GUEST_MSR 0
 #define VMX_HOST_MSR  1
 
@@ -519,8 +531,16 @@ enum vmx_insn_errno
     VMX_INSN_FAIL_INVALID                  = ~0,
 };
 
-void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type);
-void vmx_enable_intercept_for_msr(struct vcpu *v, u32 msr, int type);
+enum vmx_msr_intercept_type {
+    VMX_MSR_R  = 1,
+    VMX_MSR_W  = 2,
+    VMX_MSR_RW = VMX_MSR_R | VMX_MSR_W,
+};
+
+void vmx_clear_msr_intercept(struct vcpu *v, unsigned int msr,
+                             enum vmx_msr_intercept_type type);
+void vmx_set_msr_intercept(struct vcpu *v, unsigned int msr,
+                           enum vmx_msr_intercept_type type);
 int vmx_read_guest_msr(u32 msr, u64 *val);
 int vmx_write_guest_msr(u32 msr, u64 val);
 struct vmx_msr_entry *vmx_find_msr(u32 msr, int type);
@@ -528,7 +548,8 @@ int vmx_add_msr(u32 msr, int type);
 void vmx_vmcs_switch(paddr_t from, paddr_t to);
 void vmx_set_eoi_exit_bitmap(struct vcpu *v, u8 vector);
 void vmx_clear_eoi_exit_bitmap(struct vcpu *v, u8 vector);
-int vmx_check_msr_bitmap(unsigned long *msr_bitmap, u32 msr, int access_type);
+bool vmx_msr_is_intercepted(struct vmx_msr_bitmap *msr_bitmap,
+                            unsigned int msr, bool is_write) __nonnull(1);
 void virtual_vmcs_enter(const struct vcpu *);
 void virtual_vmcs_exit(const struct vcpu *);
 u64 virtual_vmcs_vmread(const struct vcpu *, u32 encoding);

@@ -18,7 +18,18 @@ struct arch_irq_desc {
 };
 
 #define NR_LOCAL_IRQS	32
+
+/*
+ * This only covers the interrupts that Xen cares about, so SGIs, PPIs and
+ * SPIs. LPIs are too numerous, also only propagated to guests, so they are
+ * not included in this number.
+ */
 #define NR_IRQS		1024
+
+#define LPI_OFFSET      8192
+
+/* LPIs are always numbered starting at 8192, so 0 is a good invalid case. */
+#define INVALID_LPI     0
 
 #define nr_irqs NR_IRQS
 #define nr_static_irqs NR_IRQS
@@ -33,9 +44,14 @@ struct irq_desc *__irq_to_desc(int irq);
 
 void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq);
 
+static inline bool is_lpi(unsigned int irq)
+{
+    return irq >= LPI_OFFSET;
+}
+
 #define domain_pirq_to_irq(d, pirq) (pirq)
 
-bool_t is_assignable_irq(unsigned int irq);
+bool is_assignable_irq(unsigned int irq);
 
 void init_IRQ(void);
 void init_secondary_IRQ(void);
@@ -61,7 +77,7 @@ void irq_set_affinity(struct irq_desc *desc, const cpumask_t *cpu_mask);
  * Use this helper in places that need to know whether the IRQ type is
  * set by the domain.
  */
-bool_t irq_type_set_by_domain(const struct domain *d);
+bool irq_type_set_by_domain(const struct domain *d);
 
 #endif /* _ASM_HW_IRQ_H */
 /*

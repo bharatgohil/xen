@@ -37,6 +37,13 @@ struct hvm_emulate_ctxt {
     unsigned long seg_reg_accessed;
     unsigned long seg_reg_dirty;
 
+    /*
+     * MFNs behind temporary mappings in the write callback.  The length is
+     * arbitrary, and can be increased if writes longer than PAGE_SIZE+1 are
+     * needed.
+     */
+    mfn_t mfn[2];
+
     uint32_t intr_shadow;
 
     bool_t set_context;
@@ -49,8 +56,9 @@ enum emul_kind {
     EMUL_KIND_SET_CONTEXT_INSN
 };
 
-bool __nonnull(1) hvm_emulate_one_insn(
-    hvm_emulate_validate_t *validate);
+bool __nonnull(1, 2) hvm_emulate_one_insn(
+    hvm_emulate_validate_t *validate,
+    const char *descr);
 int hvm_emulate_one(
     struct hvm_emulate_ctxt *hvmemul_ctxt);
 void hvm_emulate_one_vm_event(enum emul_kind kind,
@@ -77,7 +85,7 @@ int hvm_emulate_one_mmio(unsigned long mfn, unsigned long gla);
 
 static inline bool handle_mmio(void)
 {
-    return hvm_emulate_one_insn(x86_insn_is_mem_access);
+    return hvm_emulate_one_insn(x86_insn_is_mem_access, "MMIO");
 }
 
 int hvmemul_insn_fetch(enum x86_segment seg,
@@ -90,8 +98,8 @@ int hvmemul_do_pio_buffer(uint16_t port,
                           uint8_t dir,
                           void *buffer);
 
-void hvm_dump_emulation_state(const char *prefix,
-                              struct hvm_emulate_ctxt *hvmemul_ctxt);
+void hvm_dump_emulation_state(const char *loglvl, const char *prefix,
+                              struct hvm_emulate_ctxt *hvmemul_ctxt, int rc);
 
 #endif /* __ASM_X86_HVM_EMULATE_H__ */
 

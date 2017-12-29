@@ -40,8 +40,10 @@
 #define ARM32_WORKAROUND_766422 2
 #define ARM64_WORKAROUND_834220 3
 #define LIVEPATCH_FEATURE   4
+#define SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT 5
+#define SKIP_CTXT_SWITCH_SERROR_SYNC 6
 
-#define ARM_NCAPS           5
+#define ARM_NCAPS           7
 
 #ifndef __ASSEMBLY__
 
@@ -51,10 +53,10 @@
 
 extern DECLARE_BITMAP(cpu_hwcaps, ARM_NCAPS);
 
-static inline bool_t cpus_have_cap(unsigned int num)
+static inline bool cpus_have_cap(unsigned int num)
 {
     if ( num >= ARM_NCAPS )
-        return 0;
+        return false;
 
     return test_bit(num, cpu_hwcaps);
 }
@@ -71,7 +73,7 @@ static inline void cpus_set_cap(unsigned int num)
 struct arm_cpu_capabilities {
     const char *desc;
     u16 capability;
-    bool_t (*matches)(const struct arm_cpu_capabilities *);
+    bool (*matches)(const struct arm_cpu_capabilities *);
     union {
         struct {    /* To be used for eratum handling only */
             u32 midr_model;

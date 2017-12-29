@@ -12,11 +12,11 @@ config ARM_32
 config ARM_64
 	def_bool y
 	depends on 64BIT
-	select HAS_ALTERNATIVE
 	select HAS_GICV3
 
 config ARM
 	def_bool y
+	select HAS_ALTERNATIVE
 	select HAS_ARM_HDLCD
 	select HAS_DEVICE_TREE
 	select HAS_MEM_ACCESS
@@ -44,6 +44,18 @@ config ACPI
 
 config HAS_GICV3
 	bool
+
+config HAS_ITS
+        bool
+        prompt "GICv3 ITS MSI controller support" if EXPERT = "y"
+        depends on HAS_GICV3
+
+config SBSA_VUART_CONSOLE
+	bool "Emulated SBSA UART console support"
+	default y
+	---help---
+	  Allows a guest to use SBSA Generic UART as a console. The
+	  SBSA Generic UART implements a subset of ARM PL011 UART.
 
 endmenu
 

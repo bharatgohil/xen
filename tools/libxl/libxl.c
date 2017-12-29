@@ -373,6 +373,7 @@ int libxl_get_physinfo(libxl_ctx *ctx, libxl_physinfo *physinfo)
     physinfo->free_pages = xcphysinfo.free_pages;
     physinfo->scrub_pages = xcphysinfo.scrub_pages;
     physinfo->outstanding_pages = xcphysinfo.outstanding_pages;
+    physinfo->max_possible_mfn = xcphysinfo.max_mfn;
     l = xc_sharing_freed_pages(ctx->xch);
     if (l < 0 && errno == ENOSYS) {
         l = 0;
@@ -645,6 +646,21 @@ int libxl_send_debug_keys(libxl_ctx *ctx, char *keys)
     ret = xc_send_debug_keys(ctx->xch, keys);
     if ( ret < 0 ) {
         LOGE(ERROR, "sending debug keys");
+        GC_FREE;
+        return ERROR_FAIL;
+    }
+    GC_FREE;
+    return 0;
+}
+
+int libxl_set_parameters(libxl_ctx *ctx, char *params)
+{
+    int ret;
+    GC_INIT(ctx);
+
+    ret = xc_set_parameters(ctx->xch, params);
+    if (ret < 0) {
+        LOGEV(ERROR, ret, "setting parameters");
         GC_FREE;
         return ERROR_FAIL;
     }

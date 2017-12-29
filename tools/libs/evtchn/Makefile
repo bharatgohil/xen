@@ -2,12 +2,12 @@ XEN_ROOT = $(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 MAJOR    = 1
-MINOR    = 0
+MINOR    = 1
 SHLIB_LDFLAGS += -Wl,--version-script=libxenevtchn.map
 
 CFLAGS   += -Werror -Wmissing-prototypes
 CFLAGS   += -I./include $(CFLAGS_xeninclude)
-CFLAGS   += $(CFLAGS_libxentoollog)
+CFLAGS   += $(CFLAGS_libxentoollog) $(CFLAGS_libxentoolcore)
 
 SRCS-y                 += core.c
 SRCS-$(CONFIG_Linux)   += linux.c
@@ -61,7 +61,7 @@ libxenevtchn.so.$(MAJOR): libxenevtchn.so.$(MAJOR).$(MINOR)
 	$(SYMLINK_SHLIB) $< $@
 
 libxenevtchn.so.$(MAJOR).$(MINOR): $(PIC_OBJS) libxenevtchn.map
-	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenevtchn.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenevtchn.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxentoolcore) $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: build
@@ -74,13 +74,22 @@ install: build
 	$(INSTALL_DATA) include/xenevtchn.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xenevtchn.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenevtchn.pc
+	rm -f $(DESTDIR)$(includedir)/xenevtchn.h
+	rm -f $(DESTDIR)$(libdir)/libxenevtchn.so
+	rm -f $(DESTDIR)$(libdir)/libxenevtchn.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenevtchn.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenevtchn.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxenevtchn.so.$(MAJOR).$(MINOR) libxenevtchn.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xenevtchn.pc

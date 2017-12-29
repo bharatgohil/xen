@@ -10,6 +10,8 @@
 #include <asm/gic.h>
 #include <public/hvm/params.h>
 #include <xen/serial.h>
+#include <xen/rbtree.h>
+#include <asm-arm/vpl011.h>
 
 struct hvm_domain
 {
@@ -49,7 +51,6 @@ struct arch_domain
     struct p2m_domain p2m;
 
     struct hvm_domain hvm_domain;
-    gfn_t *grant_table_gfn;
 
     struct vmmio vmmio;
 
@@ -108,6 +109,20 @@ struct arch_domain
         } *rdist_regions;
         int nr_regions;                     /* Number of rdist regions */
         uint32_t rdist_stride;              /* Re-Distributor stride */
+        unsigned long int nr_lpis;
+        uint64_t rdist_propbase;
+        struct rb_root its_devices;         /* Devices mapped to an ITS */
+        spinlock_t its_devices_lock;        /* Protects the its_devices tree */
+        struct radix_tree_root pend_lpi_tree; /* Stores struct pending_irq's */
+        rwlock_t pend_lpi_tree_lock;        /* Protects the pend_lpi_tree */
+        struct list_head vits_list;         /* List of virtual ITSes */
+        unsigned int intid_bits;
+        /*
+         * TODO: if there are more bool's being added below, consider
+         * a flags variable instead.
+         */
+        bool rdists_enabled;                /* Is any redistributor enabled? */
+        bool has_its;
 #endif
     } vgic;
 
@@ -130,6 +145,11 @@ struct arch_domain
     struct {
         uint8_t privileged_call_enabled : 1;
     } monitor;
+
+#ifdef CONFIG_SBSA_VUART_CONSOLE
+    struct vpl011 vpl011;
+#endif
+
 }  __cacheline_aligned;
 
 struct arch_vcpu
@@ -204,6 +224,9 @@ struct arch_vcpu
     register_t tpidr_el1;
     register_t tpidrro_el0;
 
+    /* HYP configuration */
+    register_t hcr_el2;
+
     uint32_t teecr, teehbr; /* ThumbEE, 32-bit guests only */
 #ifdef CONFIG_ARM_32
     /*
@@ -251,7 +274,9 @@ struct arch_vcpu
 
         /* GICv3: redistributor base and flags for this vCPU */
         paddr_t rdist_base;
-#define VGIC_V3_RDIST_LAST  (1 << 0)        /* last vCPU of the rdist */
+        uint64_t rdist_pendbase;
+#define VGIC_V3_RDIST_LAST      (1 << 0)        /* last vCPU of the rdist */
+#define VGIC_V3_LPIS_ENABLED    (1 << 1)
         uint8_t flags;
     } vgic;
 
@@ -260,11 +285,12 @@ struct arch_vcpu
 
     struct vtimer phys_timer;
     struct vtimer virt_timer;
-    bool_t vtimer_initialized;
+    bool   vtimer_initialized;
 }  __cacheline_aligned;
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
+void vcpu_switch_to_aarch64_mode(struct vcpu *);
 
 unsigned int domain_max_vcpus(const struct domain *);
 

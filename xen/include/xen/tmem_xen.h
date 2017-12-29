@@ -35,33 +35,27 @@ extern atomic_t freeable_page_count;
 extern int tmem_init(void);
 #define tmem_hash hash_long
 
-extern bool_t opt_tmem_compress;
-static inline bool_t tmem_compression_enabled(void)
+extern bool opt_tmem_compress;
+static inline bool tmem_compression_enabled(void)
 {
     return opt_tmem_compress;
 }
 
-extern bool_t opt_tmem_shared_auth;
-static inline bool_t tmem_shared_auth(void)
-{
-    return opt_tmem_shared_auth;
-}
-
 #ifdef CONFIG_TMEM
-extern bool_t opt_tmem;
-static inline bool_t tmem_enabled(void)
+extern bool opt_tmem;
+static inline bool tmem_enabled(void)
 {
     return opt_tmem;
 }
 
 static inline void tmem_disable(void)
 {
-    opt_tmem = 0;
+    opt_tmem = false;
 }
 #else
-static inline bool_t tmem_enabled(void)
+static inline bool tmem_enabled(void)
 {
-    return 0;
+    return false;
 }
 
 static inline void tmem_disable(void)
@@ -198,8 +192,6 @@ static inline int tmem_get_tmemop_from_client(tmem_op_t *op, tmem_cli_op_t uops)
         switch ( cop.cmd )
         {
         case TMEM_NEW_POOL:   u = XLAT_tmem_op_u_creat; break;
-        case TMEM_AUTH:       u = XLAT_tmem_op_u_creat; break;
-        case TMEM_RESTORE_NEW:u = XLAT_tmem_op_u_creat; break;
         default:              u = XLAT_tmem_op_u_gen ;  break;
         }
         XLAT_tmem_op(op, &cop);
@@ -274,7 +266,7 @@ struct tmem_global {
     struct list_head ephemeral_page_list;  /* All pages in ephemeral pools. */
     struct list_head client_list;
     struct tmem_pool *shared_pools[MAX_GLOBAL_SHARED_POOLS];
-    bool_t shared_auth;
+    bool shared_auth;
     long eph_count;  /* Atomicity depends on eph_lists_spinlock. */
     atomic_t client_weight_total;
 };
@@ -293,9 +285,8 @@ struct client {
     long eph_count, eph_count_max;
     domid_t cli_id;
     xen_tmem_client_t info;
-    bool_t shared_auth_required;
     /* For save/restore/migration. */
-    bool_t was_frozen;
+    bool was_frozen;
     struct list_head persistent_invalidated_list;
     struct tmem_page_descriptor *cur_pgp;
     /* Statistics collection. */
@@ -316,9 +307,9 @@ struct client {
 #define is_shared(_p)      (_p->shared)
 
 struct tmem_pool {
-    bool_t shared;
-    bool_t persistent;
-    bool_t is_dying;
+    bool shared;
+    bool persistent;
+    bool is_dying;
     struct client *client;
     uint64_t uuid[2]; /* 0 for private, non-zero for shared. */
     uint32_t pool_id;

@@ -914,7 +914,7 @@ int viridian_hypercall(struct cpu_user_regs *regs)
 
         /* Get input parameters. */
         if ( hvm_copy_from_guest_phys(&input_params, input_params_gpa,
-                                      sizeof(input_params)) != HVMCOPY_okay )
+                                      sizeof(input_params)) != HVMTRANS_okay )
             break;
 
         /*
@@ -1083,7 +1083,7 @@ static int viridian_load_vcpu_ctxt(struct domain *d, hvm_domain_context_t *h)
 HVM_REGISTER_SAVE_RESTORE(VIRIDIAN_VCPU, viridian_save_vcpu_ctxt,
                           viridian_load_vcpu_ctxt, 1, HVMSR_PER_VCPU);
 
-static void __init parse_viridian_version(char *arg)
+static int __init parse_viridian_version(const char *arg)
 {
     const char *t;
     unsigned int n[3];
@@ -1093,24 +1093,31 @@ static void __init parse_viridian_version(char *arg)
     n[1] = viridian_minor;
     n[2] = viridian_build;
 
-    while ( (t = strsep(&arg, ",")) != NULL )
-    {
+    do {
         const char *e;
 
-        if ( *t == '\0' )
-            continue;
+        t = strchr(arg, ',');
+        if ( !t )
+            t = strchr(arg, '\0');
 
-        n[i++] = simple_strtoul(t, &e, 0);
-        if ( *e != '\0' )
-            goto fail;
-    }
+        if ( *arg && *arg != ',' && i < 3 )
+        {
+            n[i] = simple_strtoul(arg, &e, 0);
+            if ( e != t )
+                break;
+        }
+
+        i++;
+        arg = t + 1;
+    } while ( *t );
+
     if ( i != 3 )
-        goto fail;
+        return -EINVAL;
 
     if ( ((typeof(viridian_major))n[0] != n[0]) ||
          ((typeof(viridian_minor))n[1] != n[1]) ||
          ((typeof(viridian_build))n[2] != n[2]) )
-        goto fail;
+        return -EINVAL;
 
     viridian_major = n[0];
     viridian_minor = n[1];
@@ -1118,10 +1125,7 @@ static void __init parse_viridian_version(char *arg)
 
     printk("viridian-version = %#x,%#x,%#x\n",
            viridian_major, viridian_minor, viridian_build);
-    return;
-
- fail:
-    printk(XENLOG_WARNING "Invalid viridian-version, using default\n");
+    return 0;
 }
 custom_param("viridian-version", parse_viridian_version);
 

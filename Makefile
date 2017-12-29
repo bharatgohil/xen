@@ -10,6 +10,7 @@ all: dist
 SUBSYSTEMS?=xen tools stubdom docs
 TARGS_DIST=$(patsubst %, dist-%, $(SUBSYSTEMS))
 TARGS_INSTALL=$(patsubst %, install-%, $(SUBSYSTEMS))
+TARGS_UNINSTALL=$(patsubst %, uninstall-%, $(SUBSYSTEMS))
 TARGS_BUILD=$(patsubst %, build-%, $(SUBSYSTEMS))
 TARGS_CLEAN=$(patsubst %, clean-%, $(SUBSYSTEMS))
 TARGS_DISTCLEAN=$(patsubst %, distclean-%, $(SUBSYSTEMS))
@@ -38,6 +39,10 @@ mini-os-dir-force-update: mini-os-dir
 export XEN_TARGET_ARCH
 export DESTDIR
 
+.PHONY: %-tools-public-headers
+%-tools-public-headers:
+	$(MAKE) -C tools/include $*
+
 # build and install everything into the standard system directories
 .PHONY: install
 install: $(TARGS_INSTALL)
@@ -50,11 +55,11 @@ build-xen:
 	$(MAKE) -C xen build
 
 .PHONY: build-tools
-build-tools:
+build-tools: build-tools-public-headers
 	$(MAKE) -C tools build
 
 .PHONY: build-stubdom
-build-stubdom: mini-os-dir
+build-stubdom: mini-os-dir build-tools-public-headers
 	$(MAKE) -C stubdom build
 ifeq (x86_64,$(XEN_TARGET_ARCH))
 	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom pv-grub
@@ -71,7 +76,27 @@ build-docs:
 test:
 	$(MAKE) -C tools/python test
 
-# build and install everything into local dist directory
+# For most targets here,
+#   make COMPONENT-TARGET
+# is implemented, more or less, by
+#   make -C COMPONENT TARGET
+#
+# Each rule that does this needs to have dependencies on any
+# other COMPONENTs that have to be processed first.  See
+# The install-tools target here for an example.
+#
+# dist* targets are special: these do not occur in lower-level
+# Makefiles.  Instead, these are all implemented only here.
+# They run the appropriate install targets with DESTDIR set.
+#
+# Also, we have a number of targets COMPONENT which run
+# dist-COMPONENT, for convenience.
+#
+# The Makefiles invoked with -C from the toplevel should
+# generally have the following targets:
+#       all  build  install  clean  distclean
+
+
 .PHONY: dist
 dist: DESTDIR=$(DISTDIR)/install
 dist: $(TARGS_DIST) dist-misc
@@ -81,11 +106,12 @@ dist-misc:
 	$(INSTALL_DATA) ./COPYING $(DISTDIR)
 	$(INSTALL_DATA) ./README $(DISTDIR)
 	$(INSTALL_PROG) ./install.sh $(DISTDIR)
+
+
 dist-%: DESTDIR=$(DISTDIR)/install
 dist-%: install-%
 	@: # do nothing
 
-# Legacy dist targets
 .PHONY: xen tools stubdom docs
 xen: dist-xen
 tools: dist-tools
@@ -97,11 +123,11 @@ install-xen:
 	$(MAKE) -C xen install
 
 .PHONY: install-tools
-install-tools:
+install-tools: install-tools-public-headers
 	$(MAKE) -C tools install
 
 .PHONY: install-stubdom
-install-stubdom: mini-os-dir
+install-stubdom: mini-os-dir install-tools-public-headers
 	$(MAKE) -C stubdom install
 ifeq (x86_64,$(XEN_TARGET_ARCH))
 	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom install-grub
@@ -118,6 +144,17 @@ tools/firmware/ovmf-dir-force-update:
 .PHONY: install-docs
 install-docs:
 	$(MAKE) -C docs install
+
+# We only have build-tests install-tests, not uninstall-tests etc.
+.PHONY: build-tests
+build-tests: build-xen
+	export BASEDIR=$(XEN_ROOT)/xen; \
+	$(MAKE) -f $$BASEDIR/Rules.mk -C xen/test build
+
+.PHONY: install-tests
+install-tests: install-xen
+	export BASEDIR=$(XEN_ROOT)/xen; \
+	$(MAKE) -f $$BASEDIR/Rules.mk -C xen/test install
 
 # build xen and the tools and place them in the install
 # directory. 'make install' should then copy them to the normal system
@@ -174,11 +211,11 @@ clean-xen:
 	$(MAKE) -C xen clean
 
 .PHONY: clean-tools
-clean-tools:
+clean-tools: clean-tools-public-headers
 	$(MAKE) -C tools clean
 
 .PHONY: clean-stubdom
-clean-stubdom:
+clean-stubdom: clean-tools-public-headers
 	$(MAKE) -C stubdom crossclean
 ifeq (x86_64,$(XEN_TARGET_ARCH))
 	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom crossclean
@@ -191,6 +228,7 @@ clean-docs:
 # clean, but blow away tarballs
 .PHONY: distclean
 distclean: $(TARGS_DISTCLEAN)
+	$(MAKE) -C tools/include distclean
 	rm -f config/Toplevel.mk
 	rm -rf dist
 	rm -rf config.log config.status config.cache autom4te.cache
@@ -266,11 +304,26 @@ help:
 	@echo '  [ this documentation is sadly not complete ]'
 
 # Use this target with extreme care!
+
+.PHONY: uninstall-xen
+uninstall-xen:
+	$(MAKE) -C xen uninstall
+
+.PHONY: uninstall-tools
+uninstall-tools:
+	$(MAKE) -C tools uninstall
+
+.PHONY: uninstall-stubdom
+uninstall-stubdom:
+	$(MAKE) -C stubdom uninstall
+
+.PHONY: uninstall-docs
+uninstall-docs:
+	$(MAKE) -C docs uninstall
+
 .PHONY: uninstall
 uninstall: D=$(DESTDIR)
-uninstall:
-	$(MAKE) -C xen uninstall
-	make -C tools uninstall
+uninstall: uninstall-tools-public-headers $(TARGS_UNINSTALL)
 	rm -rf $(D)/boot/tboot*
 
 .PHONY: xenversion

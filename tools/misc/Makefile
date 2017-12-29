@@ -31,6 +31,7 @@ INSTALL_SBIN                   += xenperf
 INSTALL_SBIN                   += xenpm
 INSTALL_SBIN                   += xenwatchdogd
 INSTALL_SBIN                   += xen-livepatch
+INSTALL_SBIN                   += xen-diag
 INSTALL_SBIN += $(INSTALL_SBIN-y)
 
 # Everything to be installed in a private bin/
@@ -61,9 +62,15 @@ install: build
 	$(INSTALL_PYTHON_PROG) $(INSTALL_SBIN) $(DESTDIR)$(sbindir)
 	$(INSTALL_PYTHON_PROG) $(INSTALL_PRIVBIN) $(DESTDIR)$(LIBEXEC_BIN)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/, $(INSTALL_PRIVBIN))
+	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(INSTALL_SBIN))
+	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(INSTALL_BIN))
+
 .PHONY: clean
 clean:
-	$(RM) *.o $(TARGETS_BUILD) *~ $(DEPS)
+	$(RM) *.o $(TARGETS_BUILD) *~ $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
@@ -102,10 +109,13 @@ xenwatchdogd: xenwatchdogd.o
 xen-livepatch: xen-livepatch.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
 
+xen-diag: xen-diag.o
+	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
+
 xen-lowmemd: xen-lowmemd.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(LDLIBS_libxenstore) $(APPEND_LDFLAGS)
 
 xencov: xencov.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

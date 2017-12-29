@@ -2,6 +2,8 @@
  * Compatibility hypercall routines.
  */
 
+        .file "x86_64/compat/entry.S"
+
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/asm_defns.h>
@@ -11,23 +13,16 @@
 #include <public/xen.h>
 #include <irq_vectors.h>
 
-ENTRY(compat_hypercall)
+ENTRY(entry_int82)
         ASM_CLAC
         pushq $0
-        SAVE_VOLATILE type=TRAP_syscall compat=1
+        SAVE_VOLATILE type=HYPERCALL_VECTOR compat=1
         CR4_PV32_RESTORE
-
-        cmpb  $0,untrusted_msi(%rip)
-UNLIKELY_START(ne, msi_check)
-        movl  $HYPERCALL_VECTOR,%edi
-        call  check_for_unexpected_msi
-        LOAD_C_CLOBBERED compat=1 ax=0
-UNLIKELY_END(msi_check)
 
         GET_CURRENT(bx)
 
         mov   %rsp, %rdi
-        call  pv_hypercall
+        call  do_entry_int82
 
 /* %rbx: struct vcpu */
 ENTRY(compat_test_all_events)

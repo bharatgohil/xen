@@ -187,6 +187,15 @@ out:
  */
 static int hap_enable_log_dirty(struct domain *d, bool_t log_global)
 {
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+
+    /*
+     * Refuse to turn on global log-dirty mode if
+     * there are outstanding p2m_ioreq_server pages.
+     */
+    if ( log_global && read_atomic(&p2m->ioreq.entry_count) )
+        return -EBUSY;
+
     /* turn on PG_log_dirty bit in paging mode */
     paging_lock(d);
     d->arch.paging.mode |= PG_log_dirty;
@@ -239,8 +248,7 @@ static void hap_clean_dirty_bitmap(struct domain *d)
 /************************************************/
 static struct page_info *hap_alloc(struct domain *d)
 {
-    struct page_info *pg = NULL;
-    void *p;
+    struct page_info *pg;
 
     ASSERT(paging_locked_by_me(d));
 
@@ -250,9 +258,7 @@ static struct page_info *hap_alloc(struct domain *d)
 
     d->arch.paging.hap.free_pages--;
 
-    p = __map_domain_page(pg);
-    clear_page(p);
-    unmap_domain_page(p);
+    clear_domain_page(page_to_mfn(pg));
 
     return pg;
 }
@@ -280,8 +286,7 @@ static struct page_info *hap_alloc_p2m_page(struct domain *d)
     {
         d->arch.paging.hap.total_pages--;
         d->arch.paging.hap.p2m_pages++;
-        page_set_owner(pg, d);
-        pg->count_info |= 1;
+        ASSERT(!page_get_owner(pg) && !(pg->count_info & PGC_count_mask));
     }
     else if ( !d->arch.paging.p2m_alloc_failed )
     {
@@ -296,21 +301,23 @@ static struct page_info *hap_alloc_p2m_page(struct domain *d)
 
 static void hap_free_p2m_page(struct domain *d, struct page_info *pg)
 {
+    struct domain *owner = page_get_owner(pg);
+
     /* This is called both from the p2m code (which never holds the 
      * paging lock) and the log-dirty code (which always does). */
     paging_lock_recursive(d);
 
-    ASSERT(page_get_owner(pg) == d);
-    /* Should have just the one ref we gave it in alloc_p2m_page() */
-    if ( (pg->count_info & PGC_count_mask) != 1 ) {
-        HAP_ERROR("Odd p2m page %p count c=%#lx t=%"PRtype_info"\n",
-                     pg, pg->count_info, pg->u.inuse.type_info);
+    /* Should still have no owner and count zero. */
+    if ( owner || (pg->count_info & PGC_count_mask) )
+    {
+        HAP_ERROR("d%d: Odd p2m page %"PRI_mfn" d=%d c=%lx t=%"PRtype_info"\n",
+                  d->domain_id, mfn_x(page_to_mfn(pg)),
+                  owner ? owner->domain_id : DOMID_INVALID,
+                  pg->count_info, pg->u.inuse.type_info);
         WARN();
+        pg->count_info &= ~PGC_count_mask;
+        page_set_owner(pg, NULL);
     }
-    pg->count_info &= ~PGC_count_mask;
-    /* Free should not decrement domain's total allocation, since
-     * these pages were allocated without an owner. */
-    page_set_owner(pg, NULL);
     d->arch.paging.hap.p2m_pages--;
     d->arch.paging.hap.total_pages++;
     hap_free(d, page_to_mfn(pg));
@@ -385,42 +392,24 @@ int hap_set_allocation(struct domain *d, unsigned int pages, bool *preempted)
     return 0;
 }
 
-static void hap_install_xen_entries_in_l4(struct vcpu *v, mfn_t l4mfn)
-{
-    struct domain *d = v->domain;
-    l4_pgentry_t *l4e;
-
-    l4e = map_domain_page(l4mfn);
-
-    /* Copy the common Xen mappings from the idle domain */
-    memcpy(&l4e[ROOT_PAGETABLE_FIRST_XEN_SLOT],
-           &idle_pg_table[ROOT_PAGETABLE_FIRST_XEN_SLOT],
-           ROOT_PAGETABLE_XEN_SLOTS * sizeof(l4_pgentry_t));
-
-    /* Install the per-domain mappings for this domain */
-    l4e[l4_table_offset(PERDOMAIN_VIRT_START)] =
-        l4e_from_pfn(mfn_x(page_to_mfn(d->arch.perdomain_l3_pg)),
-                     __PAGE_HYPERVISOR);
-
-    /* Install a linear mapping */
-    l4e[l4_table_offset(LINEAR_PT_VIRT_START)] =
-        l4e_from_pfn(mfn_x(l4mfn), __PAGE_HYPERVISOR);
-
-    unmap_domain_page(l4e);
-}
-
 static mfn_t hap_make_monitor_table(struct vcpu *v)
 {
     struct domain *d = v->domain;
     struct page_info *pg;
+    l4_pgentry_t *l4e;
     mfn_t m4mfn;
 
     ASSERT(pagetable_get_pfn(v->arch.monitor_table) == 0);
 
     if ( (pg = hap_alloc(d)) == NULL )
         goto oom;
+
     m4mfn = page_to_mfn(pg);
-    hap_install_xen_entries_in_l4(v, m4mfn);
+    l4e = map_domain_page(m4mfn);
+
+    init_xen_l4_slots(l4e, m4mfn, d, INVALID_MFN, false);
+    unmap_domain_page(l4e);
+
     return m4mfn;
 
  oom:
@@ -567,8 +556,7 @@ void hap_teardown(struct domain *d, bool *preempted)
     ASSERT(d->is_dying);
     ASSERT(d != current->domain);
 
-    if ( !paging_locked_by_me(d) )
-        paging_lock(d); /* Keep various asserts happy */
+    paging_lock(d); /* Keep various asserts happy */
 
     if ( paging_mode_enabled(d) )
     {
@@ -604,8 +592,8 @@ out:
     paging_unlock(d);
 }
 
-int hap_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
-               XEN_GUEST_HANDLE_PARAM(void) u_domctl)
+int hap_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
+               XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     int rc;
     bool preempted = false;
@@ -690,10 +678,10 @@ static void hap_update_cr3(struct vcpu *v, int do_locking)
 const struct paging_mode *
 hap_paging_get_mode(struct vcpu *v)
 {
-    return !hvm_paging_enabled(v)   ? &hap_paging_real_mode :
-        hvm_long_mode_enabled(v) ? &hap_paging_long_mode :
-        hvm_pae_enabled(v)       ? &hap_paging_pae_mode  :
-                                   &hap_paging_protected_mode;
+    return (!hvm_paging_enabled(v)  ? &hap_paging_real_mode :
+            hvm_long_mode_active(v) ? &hap_paging_long_mode :
+            hvm_pae_enabled(v)      ? &hap_paging_pae_mode  :
+                                      &hap_paging_protected_mode);
 }
 
 static void hap_update_paging_modes(struct vcpu *v)
@@ -715,7 +703,7 @@ static void hap_update_paging_modes(struct vcpu *v)
     {
         mfn_t mmfn = hap_make_monitor_table(v);
         v->arch.monitor_table = pagetable_from_mfn(mmfn);
-        make_cr3(v, mfn_x(mmfn));
+        make_cr3(v, mmfn);
         hvm_update_host_cr3(v);
     }
 
@@ -745,8 +733,8 @@ hap_write_p2m_entry(struct domain *d, unsigned long gfn, l1_pgentry_t *p,
          && !p2m_get_hostp2m(d)->defer_nested_flush ) {
         /* We are replacing a valid entry so we need to flush nested p2ms,
          * unless the only change is an increase in access rights. */
-        mfn_t omfn = _mfn(l1e_get_pfn(*p));
-        mfn_t nmfn = _mfn(l1e_get_pfn(new));
+        mfn_t omfn = l1e_get_mfn(*p);
+        mfn_t nmfn = l1e_get_mfn(new);
         flush_nestedp2m = !( mfn_x(omfn) == mfn_x(nmfn)
             && perms_strictly_increased(old_flags, l1e_get_flags(new)) );
     }

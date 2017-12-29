@@ -233,8 +233,18 @@
 /* Location of the VM Generation ID in guest physical address space. */
 #define HVM_PARAM_VM_GENERATION_ID_ADDR 34
 
-/* Boolean: Enable altp2m */
+/*
+ * Set mode for altp2m:
+ *  disabled: don't activate altp2m (default)
+ *  mixed: allow access to all altp2m ops for both in-guest and external tools
+ *  external: allow access to external privileged tools only
+ *  limited: guest only has limited access (ie. control VMFUNC and #VE)
+ */
 #define HVM_PARAM_ALTP2M       35
+#define XEN_ALTP2M_disabled      0
+#define XEN_ALTP2M_mixed         1
+#define XEN_ALTP2M_external      2
+#define XEN_ALTP2M_limited       3
 
 /*
  * Size of the x87 FPU FIP/FDP registers that the hypervisor needs to
@@ -264,6 +274,11 @@
  */
 #define HVM_PARAM_VM86_TSS_SIZED 37
 
-#define HVM_NR_PARAMS 38
+/* Enable MCA capabilities. */
+#define HVM_PARAM_MCA_CAP 38
+#define XEN_HVM_MCA_CAP_LMCE   (xen_mk_ullong(1) << 0)
+#define XEN_HVM_MCA_CAP_MASK   XEN_HVM_MCA_CAP_LMCE
+
+#define HVM_NR_PARAMS 39
 
 #endif /* __XEN_PUBLIC_HVM_PARAMS_H__ */

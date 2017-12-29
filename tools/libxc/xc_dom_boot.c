@@ -62,25 +62,6 @@ static int setup_hypercall_page(struct xc_dom_image *dom)
     return rc;
 }
 
-static int clear_page(struct xc_dom_image *dom, xen_pfn_t pfn)
-{
-    xen_pfn_t dst;
-    int rc;
-
-    if ( pfn == 0 )
-        return 0;
-
-    dst = xc_dom_p2m(dom, pfn);
-    DOMPRINTF("%s: pfn 0x%" PRIpfn ", mfn 0x%" PRIpfn "",
-              __FUNCTION__, pfn, dst);
-    rc = xc_clear_domain_page(dom->xch, dom->guest_domid, dst);
-    if ( rc != 0 )
-        xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                     "%s: xc_clear_domain_page failed (pfn 0x%" PRIpfn
-                     ", rc=%d)", __FUNCTION__, pfn, rc);
-    return rc;
-}
-
 
 /* ------------------------------------------------------------------------ */
 
@@ -110,7 +91,7 @@ int xc_dom_compat_check(struct xc_dom_image *dom)
     return found;
 }
 
-int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch, domid_t domid)
+int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch, uint32_t domid)
 {
     dom->xch = xch;
     dom->guest_domid = domid;
@@ -222,11 +203,6 @@ int xc_dom_boot_image(struct xc_dom_image *dom)
         if ( (rc = dom->arch_hooks->setup_pgtables(dom)) != 0 )
             return rc;
 
-    if ( (rc = clear_page(dom, dom->console_pfn)) != 0 )
-        return rc;
-    if ( (rc = clear_page(dom, dom->xenstore_pfn)) != 0 )
-        return rc;
-
     /* start info page */
     if ( dom->arch_hooks->start_info )
         dom->arch_hooks->start_info(dom);
@@ -248,7 +224,7 @@ int xc_dom_boot_image(struct xc_dom_image *dom)
     return rc;
 }
 
-static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, domid_t domid)
+static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, uint32_t domid)
 {
     gnttab_setup_table_t setup;
     DECLARE_HYPERCALL_BUFFER(xen_pfn_t, gmfnp);
@@ -280,11 +256,11 @@ static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, domid_t domid)
     return gmfn;
 }
 
-int xc_dom_gnttab_seed(xc_interface *xch, domid_t domid,
+int xc_dom_gnttab_seed(xc_interface *xch, uint32_t domid,
                        xen_pfn_t console_gmfn,
                        xen_pfn_t xenstore_gmfn,
-                       domid_t console_domid,
-                       domid_t xenstore_domid)
+                       uint32_t console_domid,
+                       uint32_t xenstore_domid)
 {
 
     xen_pfn_t gnttab_gmfn;
@@ -337,11 +313,11 @@ int xc_dom_gnttab_seed(xc_interface *xch, domid_t domid,
     return 0;
 }
 
-int xc_dom_gnttab_hvm_seed(xc_interface *xch, domid_t domid,
+int xc_dom_gnttab_hvm_seed(xc_interface *xch, uint32_t domid,
                            xen_pfn_t console_gpfn,
                            xen_pfn_t xenstore_gpfn,
-                           domid_t console_domid,
-                           domid_t xenstore_domid)
+                           uint32_t console_domid,
+                           uint32_t xenstore_domid)
 {
     int rc;
     xen_pfn_t scratch_gpfn;

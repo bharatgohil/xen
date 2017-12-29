@@ -1,7 +1,7 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-MAJOR    = 4.9
+MAJOR    = 4.10
 MINOR    = 0
 
 ifeq ($(CONFIG_LIBXC_MINIOS),y)
@@ -203,13 +203,29 @@ install: build
 	$(INSTALL_DATA) xencontrol.pc $(DESTDIR)$(PKG_INSTALLDIR)
 	$(INSTALL_DATA) xenguest.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenguest.pc
+	rm -f $(DESTDIR)$(includedir)/xenguest.h
+	rm -f $(DESTDIR)$(libdir)/libxenguest.so
+	rm -f $(DESTDIR)$(libdir)/libxenguest.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenguest.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenguest.a
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xencontrol.pc
+	rm -f $(DESTDIR)$(includedir)/xenctrl.h
+	rm -f $(DESTDIR)$(includedir)/xenctrl_compat.h
+	rm -f $(DESTDIR)$(libdir)/libxenctrl.so
+	rm -f $(DESTDIR)$(libdir)/libxenctrl.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenctrl.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenctrl.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) \
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) \
             _paths.h \
 	    xencontrol.pc xenguest.pc \
             $(CTRL_LIB_OBJS) $(CTRL_PIC_OBJS) \
@@ -264,5 +280,5 @@ libxenguest.so.$(MAJOR).$(MINOR): COMPRESSION_LIBS = $(filter -l%,$(zlib-options
 libxenguest.so.$(MAJOR).$(MINOR): $(GUEST_PIC_OBJS) libxenctrl.so
 	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenguest.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(GUEST_PIC_OBJS) $(COMPRESSION_LIBS) -lz $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)
 

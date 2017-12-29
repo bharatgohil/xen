@@ -4,12 +4,14 @@
  * Copyright (c) 2012, Citrix Systems
  */
 
-#include <xen/types.h>
-#include <xen/lib.h>
 #include <xen/errno.h>
-#include <xen/sched.h>
+#include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <xen/iocap.h>
+#include <xen/lib.h>
+#include <xen/mm.h>
+#include <xen/sched.h>
+#include <xen/types.h>
 #include <xsm/xsm.h>
 #include <public/domctl.h>
 
@@ -18,6 +20,29 @@ void arch_get_domain_info(const struct domain *d,
 {
     /* All ARM domains use hardware assisted paging. */
     info->flags |= XEN_DOMINF_hap;
+}
+
+static int handle_vuart_init(struct domain *d, 
+                             struct xen_domctl_vuart_op *vuart_op)
+{
+    int rc;
+    struct vpl011_init_info info;
+
+    info.console_domid = vuart_op->console_domid;
+    info.gfn = _gfn(vuart_op->gfn);
+
+    if ( d->creation_finished )
+        return -EPERM;
+
+    if ( vuart_op->type != XEN_DOMCTL_VUART_TYPE_VPL011 )
+        return -EOPNOTSUPP;
+
+    rc = domain_vpl011_init(d, &info);
+
+    if ( !rc )
+        vuart_op->evtchn = info.evtchn;
+
+    return rc;
 }
 
 long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
@@ -41,7 +66,7 @@ long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
     case XEN_DOMCTL_bind_pt_irq:
     {
         int rc;
-        xen_domctl_bind_pt_irq_t *bind = &domctl->u.bind_pt_irq;
+        struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
         uint32_t irq = bind->u.spi.spi;
         uint32_t virq = bind->machine_irq;
 
@@ -87,7 +112,7 @@ long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
     case XEN_DOMCTL_unbind_pt_irq:
     {
         int rc;
-        xen_domctl_bind_pt_irq_t *bind = &domctl->u.bind_pt_irq;
+        struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
         uint32_t irq = bind->u.spi.spi;
         uint32_t virq = bind->machine_irq;
 
@@ -119,6 +144,33 @@ long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
         d->disable_migrate = domctl->u.disable_migrate.disable;
         return 0;
 
+    case XEN_DOMCTL_vuart_op:
+    {
+        int rc;
+        unsigned int i;
+        struct xen_domctl_vuart_op *vuart_op = &domctl->u.vuart_op;
+
+        /* check that structure padding must be 0. */
+        for ( i = 0; i < sizeof(vuart_op->pad); i++ )
+            if ( vuart_op->pad[i] )
+                return -EINVAL;
+
+        switch( vuart_op->cmd )
+        {
+        case XEN_DOMCTL_VUART_OP_INIT:
+            rc = handle_vuart_init(d, vuart_op);
+            break;
+
+        default:
+            rc = -EINVAL;
+            break;
+        }
+
+        if ( !rc )
+            rc = copy_to_guest(u_domctl, domctl, 1);
+
+        return rc;
+    }
     default:
     {
         int rc;

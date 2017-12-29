@@ -30,7 +30,7 @@
 #include <asm/vm_event.h>
 #include <public/vm_event.h>
 
-bool_t hvm_monitor_cr(unsigned int index, unsigned long value, unsigned long old)
+bool hvm_monitor_cr(unsigned int index, unsigned long value, unsigned long old)
 {
     struct vcpu *curr = current;
     struct arch_domain *ad = &curr->domain->arch;
@@ -38,9 +38,10 @@ bool_t hvm_monitor_cr(unsigned int index, unsigned long value, unsigned long old
 
     if ( (ad->monitor.write_ctrlreg_enabled & ctrlreg_bitmask) &&
          (!(ad->monitor.write_ctrlreg_onchangeonly & ctrlreg_bitmask) ||
-          value != old) )
+          value != old) &&
+         (!((value ^ old) & ad->monitor.write_ctrlreg_mask[index])) )
     {
-        bool_t sync = !!(ad->monitor.write_ctrlreg_sync & ctrlreg_bitmask);
+        bool sync = ad->monitor.write_ctrlreg_sync & ctrlreg_bitmask;
 
         vm_event_request_t req = {
             .reason = VM_EVENT_REASON_WRITE_CTRLREG,
@@ -54,6 +55,23 @@ bool_t hvm_monitor_cr(unsigned int index, unsigned long value, unsigned long old
     }
 
     return 0;
+}
+
+bool hvm_monitor_emul_unimplemented(void)
+{
+    struct vcpu *curr = current;
+
+    /*
+     * Send a vm_event to the monitor to signal that the current
+     * instruction couldn't be emulated.
+     */
+    vm_event_request_t req = {
+        .reason = VM_EVENT_REASON_EMUL_UNIMPLEMENTED,
+        .vcpu_id  = curr->vcpu_id,
+    };
+
+    return curr->domain->arch.monitor.emul_unimplemented_enabled &&
+        monitor_traps(curr, true, &req) == 1;
 }
 
 void hvm_monitor_msr(unsigned int msr, uint64_t value)
@@ -70,6 +88,29 @@ void hvm_monitor_msr(unsigned int msr, uint64_t value)
 
         monitor_traps(curr, 1, &req);
     }
+}
+
+void hvm_monitor_descriptor_access(uint64_t exit_info,
+                                   uint64_t vmx_exit_qualification,
+                                   uint8_t descriptor, bool is_write)
+{
+    vm_event_request_t req = {
+        .reason = VM_EVENT_REASON_DESCRIPTOR_ACCESS,
+        .u.desc_access.descriptor = descriptor,
+        .u.desc_access.is_write = is_write,
+    };
+
+    if ( cpu_has_vmx )
+    {
+        req.u.desc_access.arch.vmx.instr_info = exit_info;
+        req.u.desc_access.arch.vmx.exit_qualification = vmx_exit_qualification;
+    }
+    else
+    {
+        req.u.desc_access.arch.svm.exitinfo = exit_info;
+    }
+
+    monitor_traps(current, true, &req);
 }
 
 static inline unsigned long gfn_of_rip(unsigned long rip)
@@ -92,7 +133,7 @@ int hvm_monitor_debug(unsigned long rip, enum hvm_monitor_debug_type type,
     struct vcpu *curr = current;
     struct arch_domain *ad = &curr->domain->arch;
     vm_event_request_t req = {};
-    bool_t sync;
+    bool sync;
 
     switch ( type )
     {
@@ -103,7 +144,7 @@ int hvm_monitor_debug(unsigned long rip, enum hvm_monitor_debug_type type,
         req.u.software_breakpoint.gfn = gfn_of_rip(rip);
         req.u.software_breakpoint.type = trap_type;
         req.u.software_breakpoint.insn_length = insn_length;
-        sync = 1;
+        sync = true;
         break;
 
     case HVM_MONITOR_SINGLESTEP_BREAKPOINT:
@@ -111,7 +152,7 @@ int hvm_monitor_debug(unsigned long rip, enum hvm_monitor_debug_type type,
             return 0;
         req.reason = VM_EVENT_REASON_SINGLESTEP;
         req.u.singlestep.gfn = gfn_of_rip(rip);
-        sync = 1;
+        sync = true;
         break;
 
     case HVM_MONITOR_DEBUG_EXCEPTION:

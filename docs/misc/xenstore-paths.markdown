@@ -211,6 +211,28 @@ will not relocate guest memory.
 
 The BIOS used by this domain.
 
+#### ~/bios-strings/bios-vendor = STRING [HVM,INTERNAL]
+#### ~/bios-strings/bios-version = STRING [HVM,INTERNAL]
+#### ~/bios-strings/system-manufacturer = STRING [HVM,INTERNAL]
+#### ~/bios-strings/system-product-name = STRING [HVM,INTERNAL]
+#### ~/bios-strings/system-version = STRING [HVM,INTERNAL]
+#### ~/bios-strings/system-serial-number = STRING [HVM,INTERNAL]
+#### ~/bios-strings/enclosure-manufacturer = STRING [HVM,INTERNAL]
+#### ~/bios-strings/enclosure-serial-number = STRING [HVM,INTERNAL]
+#### ~/bios-strings/enclosure-asset-tag = STRING [HVM,INTERNAL]
+#### ~/bios-strings/battery-manufacturer = STRING [HVM,INTERNAL]
+#### ~/bios-strings/battery-device-name = STRING [HVM,INTERNAL]
+
+These xenstore values are used to override some of the default string
+values in the SMBIOS table constructed in hvmloader. See the SMBIOS
+table specification at http://www.dmtf.org/standards/smbios/ 
+
+#### ~/bios-strings/oem-* = STRING [HVM,INTERNAL]
+
+1 to 99 OEM strings can be set in xenstore using values of the form
+'~/bios-strings/oem-1' to '~/bios-strings/oem-99'. These strings will be
+loaded into the SMBIOS type 11 structure.
+
 #### ~/platform/* = ("0"|"1") [HVM,INTERNAL]
 
 Various boolean platform properties.
@@ -218,6 +240,8 @@ Various boolean platform properties.
 * acpi -- is ACPI enabled for this domain
 * acpi_s3 -- is ACPI S3 support enabled for this domain
 * acpi_s4 -- is ACPI S4 support enabled for this domain
+* acpi_laptop_slate -- is the ACPI laptop/slate device present in
+                       this domain
 
 #### ~/platform/generation-id = INTEGER ":" INTEGER [HVM,INTERNAL]
 
@@ -432,6 +456,21 @@ Indicates to the guest that this platform supports the
 XS_RESET_WATCHES xenstore message. See
 [xen/include/public/io/xs\_wire.h][XSWIRE] for the XenStore wire
 protocol definition.
+
+#### ~/control/laptop-slate-mode = (""|"laptop"|"slate") [w]
+
+This is the PV laptop/slate mode control node. If the toolstack has
+provisioned a guest with the ACPI laptop/slate mode device then it
+can write the desired mode here to cause the guest to switch modes if
+necessary. The guest acknowledges a request by writing the empty
+string back to the control node.
+
+#### ~/control/feature-laptop-slate-mode = (""|"0"|"1") [w]
+
+This may be initialized to "" by the toolstack and may then be set
+to 0 or 1 by a guest to indicate whether it is capable or incapable,
+respectively, of responding to a mode value written to
+~/control/laptop-slate-mode.
 
 ### Domain Controlled Paths
 

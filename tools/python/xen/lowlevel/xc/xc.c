@@ -711,29 +711,6 @@ static PyObject *pyxc_create_cpuid_dict(char **regs)
    return dict;
 }
 
-static PyObject *pyxc_dom_check_cpuid(XcObject *self,
-                                      PyObject *args)
-{
-    PyObject *sub_input, *config;
-    unsigned int input[2];
-    char *regs[4], *regs_transform[4];
-
-    if ( !PyArg_ParseTuple(args, "iOO", &input[0], &sub_input, &config) )
-        return NULL;
-
-    pyxc_dom_extract_cpuid(config, regs);
-
-    input[1] = XEN_CPUID_INPUT_UNUSED;
-    if ( PyLong_Check(sub_input) )
-        input[1] = PyLong_AsUnsignedLong(sub_input);
-
-    if ( xc_cpuid_check(self->xc_handle, input,
-                        (const char **)regs, regs_transform) )
-        return pyxc_error_to_exception(self->xc_handle);
-
-    return pyxc_create_cpuid_dict(regs_transform);
-}
-
 static PyObject *pyxc_dom_set_policy_cpuid(XcObject *self,
                                            PyObject *args)
 {
@@ -1371,16 +1348,19 @@ static PyObject *pyxc_sched_credit2_domain_set(XcObject *self,
 {
     uint32_t domid;
     uint16_t weight;
-    static char *kwd_list[] = { "domid", "weight", NULL };
-    static char kwd_type[] = "I|H";
-    struct xen_domctl_sched_credit2 sdom;
+    uint16_t cap;
+    static char *kwd_list[] = { "domid", "weight", "cap", NULL };
+    static char kwd_type[] = "I|HH";
+    struct xen_domctl_sched_credit2 sdom = { };
 
     weight = 0;
+    cap = 0;
     if( !PyArg_ParseTupleAndKeywords(args, kwds, kwd_type, kwd_list,
-                                     &domid, &weight) )
+                                     &domid, &weight, &cap) )
         return NULL;
 
     sdom.weight = weight;
+    sdom.cap = cap;
 
     if ( xc_sched_credit2_domain_set(self->xc_handle, domid, &sdom) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
@@ -1392,7 +1372,7 @@ static PyObject *pyxc_sched_credit2_domain_set(XcObject *self,
 static PyObject *pyxc_sched_credit2_domain_get(XcObject *self, PyObject *args)
 {
     uint32_t domid;
-    struct xen_domctl_sched_credit2 sdom;
+    struct xen_domctl_sched_credit2 sdom = { };
 
     if( !PyArg_ParseTuple(args, "I", &domid) )
         return NULL;
@@ -1400,8 +1380,8 @@ static PyObject *pyxc_sched_credit2_domain_get(XcObject *self, PyObject *args)
     if ( xc_sched_credit2_domain_get(self->xc_handle, domid, &sdom) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return Py_BuildValue("{s:H}",
-                         "weight",  sdom.weight);
+    return Py_BuildValue("{s:HH}",
+                         "weight", "cap",  sdom.weight, sdom.cap);
 }
 
 static PyObject *pyxc_domain_setmaxmem(XcObject *self, PyObject *args)
@@ -2467,17 +2447,6 @@ static PyMethodDef pyxc_methods[] = {
       " keys    [str]: String of keys to inject.\n" },
 
 #if defined(__i386__) || defined(__x86_64__)
-    { "domain_check_cpuid", 
-      (PyCFunction)pyxc_dom_check_cpuid, 
-      METH_VARARGS, "\n"
-      "Apply checks to host CPUID.\n"
-      " input [long]: Input for cpuid instruction (eax)\n"
-      " sub_input [long]: Second input (optional, may be None) for cpuid "
-      "                     instruction (ecx)\n"
-      " config [dict]: Dictionary of register\n"
-      " config [dict]: Dictionary of register, use for checking\n\n"
-      "Returns: [int] 0 on success; exception on error.\n" },
-    
     { "domain_set_cpuid", 
       (PyCFunction)pyxc_dom_set_cpuid, 
       METH_VARARGS, "\n"

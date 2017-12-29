@@ -20,6 +20,7 @@
 
 #include <xen/bitops.h>
 #include <asm/mmio.h>
+#include <asm/vreg.h>
 
 struct pending_irq
 {
@@ -60,18 +61,26 @@ struct pending_irq
      * vcpu while it is still inflight and on an GICH_LR register on the
      * old vcpu.
      *
+     * GIC_IRQ_GUEST_PRISTINE_LPI: the IRQ is a newly mapped LPI, which
+     * has never been in an LR before. This means that any trace of an
+     * LPI with the same number in an LR must be from an older LPI, which
+     * has been unmapped before.
+     *
      */
 #define GIC_IRQ_GUEST_QUEUED   0
 #define GIC_IRQ_GUEST_ACTIVE   1
 #define GIC_IRQ_GUEST_VISIBLE  2
 #define GIC_IRQ_GUEST_ENABLED  3
 #define GIC_IRQ_GUEST_MIGRATING   4
+#define GIC_IRQ_GUEST_PRISTINE_LPI  5
     unsigned long status;
     struct irq_desc *desc; /* only set it the irq corresponds to a physical irq */
     unsigned int irq;
 #define GIC_INVALID_LR         (uint8_t)~0
     uint8_t lr;
     uint8_t priority;
+    uint8_t lpi_priority;       /* Caches the priority if this is an LPI. */
+    uint8_t lpi_vcpu_id;        /* The VCPU for an LPI. */
     /* inflight is used to append instances of pending_irq to
      * vgic.inflight_irqs */
     struct list_head inflight;
@@ -134,6 +143,9 @@ struct vgic_ops {
     void (*domain_free)(struct domain *d);
     /* vGIC sysreg/cpregs emulate */
     bool (*emulate_reg)(struct cpu_user_regs *regs, union hsr hsr);
+    /* lookup the struct pending_irq for a given LPI interrupt */
+    struct pending_irq *(*lpi_to_pending)(struct domain *d, unsigned int vlpi);
+    int (*lpi_get_priority)(struct domain *d, uint32_t vlpi);
     /* Maximum number of vCPU supported */
     const unsigned int max_vcpus;
 };
@@ -171,116 +183,6 @@ static inline int REG_RANK_NR(int b, uint32_t n)
     }
 }
 
-#define VGIC_REG_MASK(size) ((~0UL) >> (BITS_PER_LONG - ((1 << (size)) * 8)))
-
-/*
- * The check on the size supported by the register has to be done by
- * the caller of vgic_regN_*.
- *
- * vgic_reg_* should never be called directly. Instead use the vgic_regN_*
- * according to size of the emulated register
- *
- * Note that the alignment fault will always be taken in the guest
- * (see B3.12.7 DDI0406.b).
- */
-static inline register_t vgic_reg_extract(unsigned long reg,
-                                          unsigned int offset,
-                                          enum dabt_size size)
-{
-    reg >>= 8 * offset;
-    reg &= VGIC_REG_MASK(size);
-
-    return reg;
-}
-
-static inline void vgic_reg_update(unsigned long *reg, register_t val,
-                                   unsigned int offset,
-                                   enum dabt_size size)
-{
-    unsigned long mask = VGIC_REG_MASK(size);
-    int shift = offset * 8;
-
-    *reg &= ~(mask << shift);
-    *reg |= ((unsigned long)val & mask) << shift;
-}
-
-static inline void vgic_reg_setbits(unsigned long *reg, register_t bits,
-                                    unsigned int offset,
-                                    enum dabt_size size)
-{
-    unsigned long mask = VGIC_REG_MASK(size);
-    int shift = offset * 8;
-
-    *reg |= ((unsigned long)bits & mask) << shift;
-}
-
-static inline void vgic_reg_clearbits(unsigned long *reg, register_t bits,
-                                      unsigned int offset,
-                                      enum dabt_size size)
-{
-    unsigned long mask = VGIC_REG_MASK(size);
-    int shift = offset * 8;
-
-    *reg &= ~(((unsigned long)bits & mask) << shift);
-}
-
-/* N-bit register helpers */
-#define VGIC_REG_HELPERS(sz, offmask)                                   \
-static inline register_t vgic_reg##sz##_extract(uint##sz##_t reg,       \
-                                                const mmio_info_t *info)\
-{                                                                       \
-    return vgic_reg_extract(reg, info->gpa & offmask,                   \
-                            info->dabt.size);                           \
-}                                                                       \
-                                                                        \
-static inline void vgic_reg##sz##_update(uint##sz##_t *reg,             \
-                                         register_t val,                \
-                                         const mmio_info_t *info)       \
-{                                                                       \
-    unsigned long tmp = *reg;                                           \
-                                                                        \
-    vgic_reg_update(&tmp, val, info->gpa & offmask,                     \
-                    info->dabt.size);                                   \
-                                                                        \
-    *reg = tmp;                                                         \
-}                                                                       \
-                                                                        \
-static inline void vgic_reg##sz##_setbits(uint##sz##_t *reg,            \
-                                          register_t bits,              \
-                                          const mmio_info_t *info)      \
-{                                                                       \
-    unsigned long tmp = *reg;                                           \
-                                                                        \
-    vgic_reg_setbits(&tmp, bits, info->gpa & offmask,                   \
-                     info->dabt.size);                                  \
-                                                                        \
-    *reg = tmp;                                                         \
-}                                                                       \
-                                                                        \
-static inline void vgic_reg##sz##_clearbits(uint##sz##_t *reg,          \
-                                            register_t bits,            \
-                                            const mmio_info_t *info)    \
-{                                                                       \
-    unsigned long tmp = *reg;                                           \
-                                                                        \
-    vgic_reg_clearbits(&tmp, bits, info->gpa & offmask,                 \
-                       info->dabt.size);                                \
-                                                                        \
-    *reg = tmp;                                                         \
-}
-
-/*
- * 64 bits registers are only supported on platform with 64-bit long.
- * This is also allow us to optimize the 32 bit case by using
- * unsigned long rather than uint64_t
- */
-#if BITS_PER_LONG == 64
-VGIC_REG_HELPERS(64, 0x7);
-#endif
-VGIC_REG_HELPERS(32, 0x3);
-
-#undef VGIC_REG_HELPERS
-
 enum gic_sgi_mode;
 
 /*
@@ -289,6 +191,11 @@ enum gic_sgi_mode;
  */
 #define REG_RANK_INDEX(b, n, s) ((((n) >> s) & ((b)-1)) % 32)
 
+/*
+ * In the moment vgic_num_irqs() just covers SPIs and the private IRQs,
+ * as it's mostly used for allocating the pending_irq and irq_desc array,
+ * in which LPIs don't participate.
+ */
 #define vgic_num_irqs(d)        ((d)->arch.vgic.nr_spis + 32)
 
 extern int domain_vgic_init(struct domain *d, unsigned int nr_spis);
@@ -298,6 +205,7 @@ extern struct vcpu *vgic_get_target_vcpu(struct vcpu *v, unsigned int virq);
 extern void vgic_vcpu_inject_irq(struct vcpu *v, unsigned int virq);
 extern void vgic_vcpu_inject_spi(struct domain *d, unsigned int virq);
 extern void vgic_clear_pending_irqs(struct vcpu *v);
+extern void vgic_init_pending_irq(struct pending_irq *p, unsigned int virq);
 extern struct pending_irq *irq_to_pending(struct vcpu *v, unsigned int irq);
 extern struct pending_irq *spi_to_pending(struct domain *d, unsigned int irq);
 extern struct vgic_irq_rank *vgic_rank_offset(struct vcpu *v, int b, int n, int s);
@@ -314,7 +222,7 @@ extern int vcpu_vgic_free(struct vcpu *v);
 extern bool vgic_to_sgi(struct vcpu *v, register_t sgir,
                         enum gic_sgi_mode irqmode, int virq,
                         const struct sgi_target *target);
-extern void vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq);
+extern bool vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq);
 
 /* Reserve a specific guest vIRQ */
 extern bool vgic_reserve_virq(struct domain *d, unsigned int virq);
@@ -346,7 +254,8 @@ struct rdist_region;
 void vgic_v3_setup_hw(paddr_t dbase,
                       unsigned int nr_rdist_regions,
                       const struct rdist_region *regions,
-                      uint32_t rdist_stride);
+                      uint32_t rdist_stride,
+                      unsigned int intid_bits);
 #endif
 
 #endif /* __ASM_ARM_VGIC_H__ */

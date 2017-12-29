@@ -23,7 +23,6 @@
 #include <xen/irq.h>
 #include <asm/hvm/irq.h>
 #include <asm/hvm/support.h>
-#include <xen/hvm/irq.h>
 #include <asm/io_apic.h>
 
 static DEFINE_PER_CPU(struct list_head, dpci_list);
@@ -82,17 +81,17 @@ static void raise_softirq_for(struct hvm_pirq_dpci *pirq_dpci)
  * If it is false, it is the callers responsibility to make sure
  * that the softirq (with the event_lock dropped) has ran.
  */
-bool_t pt_pirq_softirq_active(struct hvm_pirq_dpci *pirq_dpci)
+bool pt_pirq_softirq_active(struct hvm_pirq_dpci *pirq_dpci)
 {
     if ( pirq_dpci->state & ((1 << STATE_RUN) | (1 << STATE_SCHED)) )
-        return 1;
+        return true;
 
     /*
      * If in the future we would call 'raise_softirq_for' right away
      * after 'pt_pirq_softirq_active' we MUST reset the list (otherwise it
      * might have stale data).
      */
-    return 0;
+    return false;
 }
 
 /*
@@ -137,7 +136,7 @@ static void pt_pirq_softirq_reset(struct hvm_pirq_dpci *pirq_dpci)
     pirq_dpci->masked = 0;
 }
 
-bool_t pt_irq_need_timer(uint32_t flags)
+bool pt_irq_need_timer(uint32_t flags)
 {
     return !(flags & (HVM_IRQ_DPCI_GUEST_MSI | HVM_IRQ_DPCI_TRANSLATE));
 }
@@ -163,6 +162,23 @@ static void pt_irq_time_out(void *data)
     const struct dev_intx_gsi_link *digl;
 
     spin_lock(&irq_map->dom->event_lock);
+
+    if ( irq_map->flags & HVM_IRQ_DPCI_IDENTITY_GSI )
+    {
+        ASSERT(is_hardware_domain(irq_map->dom));
+        /*
+         * Identity mapped, no need to iterate over the guest GSI list to find
+         * other pirqs sharing the same guest GSI.
+         *
+         * In the identity mapped case the EOI can also be done now, this way
+         * the iteration over the list of domain pirqs is avoided.
+         */
+        hvm_gsi_deassert(irq_map->dom, dpci_pirq(irq_map)->pirq);
+        irq_map->flags |= HVM_IRQ_DPCI_EOI_LATCH;
+        pt_irq_guest_eoi(irq_map->dom, irq_map, NULL);
+        spin_unlock(&irq_map->dom->event_lock);
+        return;
+    }
 
     dpci = domain_get_irq_dpci(irq_map->dom);
     if ( unlikely(!dpci) )
@@ -195,7 +211,7 @@ struct hvm_irq_dpci *domain_get_irq_dpci(const struct domain *d)
     if ( !d || !is_hvm_domain(d) )
         return NULL;
 
-    return d->arch.hvm_domain.irq.dpci;
+    return hvm_domain_irq(d)->dpci;
 }
 
 void free_hvm_irq_dpci(struct hvm_irq_dpci *dpci)
@@ -216,7 +232,7 @@ void free_hvm_irq_dpci(struct hvm_irq_dpci *dpci)
  */
 static struct vcpu *vector_hashing_dest(const struct domain *d,
                                         uint32_t dest_id,
-                                        bool_t dest_mode,
+                                        bool dest_mode,
                                         uint8_t gvec)
 
 {
@@ -259,54 +275,8 @@ static struct vcpu *vector_hashing_dest(const struct domain *d,
     return dest;
 }
 
-/*
- * The purpose of this routine is to find the right destination vCPU for
- * an interrupt which will be delivered by VT-d posted-interrupt. There
- * are several cases as below:
- *
- * - For lowest-priority interrupts, use vector-hashing mechanism to find
- *   the destination.
- * - Otherwise, for single destination interrupt, it is straightforward to
- *   find the destination vCPU and return true.
- * - For multicast/broadcast vCPU, we cannot handle it via interrupt posting,
- *   so return NULL.
- */
-static struct vcpu *pi_find_dest_vcpu(const struct domain *d, uint32_t dest_id,
-                                      bool_t dest_mode, uint8_t delivery_mode,
-                                      uint8_t gvec)
-{
-    unsigned int dest_vcpus = 0;
-    struct vcpu *v, *dest = NULL;
-
-    switch ( delivery_mode )
-    {
-    case dest_LowestPrio:
-        return vector_hashing_dest(d, dest_id, dest_mode, gvec);
-    case dest_Fixed:
-        for_each_vcpu ( d, v )
-        {
-            if ( !vlapic_match_dest(vcpu_vlapic(v), NULL, APIC_DEST_NOSHORT,
-                                    dest_id, dest_mode) )
-                continue;
-
-            dest_vcpus++;
-            dest = v;
-        }
-
-        /* For fixed mode, we only handle single-destination interrupts. */
-        if ( dest_vcpus == 1 )
-            return dest;
-
-        break;
-    default:
-        break;
-    }
-
-    return NULL;
-}
-
 int pt_irq_create_bind(
-    struct domain *d, xen_domctl_bind_pt_irq_t *pt_irq_bind)
+    struct domain *d, const struct xen_domctl_bind_pt_irq *pt_irq_bind)
 {
     struct hvm_irq_dpci *hvm_irq_dpci;
     struct hvm_pirq_dpci *pirq_dpci;
@@ -320,20 +290,26 @@ int pt_irq_create_bind(
     spin_lock(&d->event_lock);
 
     hvm_irq_dpci = domain_get_irq_dpci(d);
-    if ( hvm_irq_dpci == NULL )
+    if ( !hvm_irq_dpci && !is_hardware_domain(d) )
     {
         unsigned int i;
 
+        /*
+         * NB: the hardware domain doesn't use a hvm_irq_dpci struct because
+         * it's only allowed to identity map GSIs, and so the data contained in
+         * that struct (used to map guest GSIs into machine GSIs and perform
+         * interrupt routing) is completely useless to it.
+         */
         hvm_irq_dpci = xzalloc(struct hvm_irq_dpci);
         if ( hvm_irq_dpci == NULL )
         {
             spin_unlock(&d->event_lock);
             return -ENOMEM;
         }
-        for ( i = 0; i < NR_HVM_IRQS; i++ )
+        for ( i = 0; i < NR_HVM_DOMU_IRQS; i++ )
             INIT_LIST_HEAD(&hvm_irq_dpci->girq[i]);
 
-        d->arch.hvm_domain.irq.dpci = hvm_irq_dpci;
+        hvm_domain_irq(d)->dpci = hvm_irq_dpci;
     }
 
     info = pirq_get_info(d, pirq);
@@ -363,15 +339,19 @@ int pt_irq_create_bind(
     {
     case PT_IRQ_TYPE_MSI:
     {
-        uint8_t dest, dest_mode, delivery_mode;
+        uint8_t dest, delivery_mode;
+        bool dest_mode;
         int dest_vcpu_id;
+        const struct vcpu *vcpu;
+        uint32_t gflags = pt_irq_bind->u.msi.gflags &
+                          ~XEN_DOMCTL_VMSI_X86_UNMASKED;
 
         if ( !(pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) )
         {
             pirq_dpci->flags = HVM_IRQ_DPCI_MAPPED | HVM_IRQ_DPCI_MACH_MSI |
                                HVM_IRQ_DPCI_GUEST_MSI;
             pirq_dpci->gmsi.gvec = pt_irq_bind->u.msi.gvec;
-            pirq_dpci->gmsi.gflags = pt_irq_bind->u.msi.gflags;
+            pirq_dpci->gmsi.gflags = gflags;
             /*
              * 'pt_irq_create_bind' can be called after 'pt_irq_destroy_bind'.
              * The 'pirq_cleanup_check' which would free the structure is only
@@ -424,39 +404,57 @@ int pt_irq_create_bind(
 
             /* If pirq is already mapped as vmsi, update guest data/addr. */
             if ( pirq_dpci->gmsi.gvec != pt_irq_bind->u.msi.gvec ||
-                 pirq_dpci->gmsi.gflags != pt_irq_bind->u.msi.gflags )
+                 pirq_dpci->gmsi.gflags != gflags )
             {
                 /* Directly clear pending EOIs before enabling new MSI info. */
                 pirq_guest_eoi(info);
 
                 pirq_dpci->gmsi.gvec = pt_irq_bind->u.msi.gvec;
-                pirq_dpci->gmsi.gflags = pt_irq_bind->u.msi.gflags;
+                pirq_dpci->gmsi.gflags = gflags;
             }
         }
         /* Calculate dest_vcpu_id for MSI-type pirq migration. */
-        dest = pirq_dpci->gmsi.gflags & VMSI_DEST_ID_MASK;
-        dest_mode = !!(pirq_dpci->gmsi.gflags & VMSI_DM_MASK);
-        delivery_mode = (pirq_dpci->gmsi.gflags & VMSI_DELIV_MASK) >>
-                         GFLAGS_SHIFT_DELIV_MODE;
+        dest = MASK_EXTR(pirq_dpci->gmsi.gflags,
+                         XEN_DOMCTL_VMSI_X86_DEST_ID_MASK);
+        dest_mode = pirq_dpci->gmsi.gflags & XEN_DOMCTL_VMSI_X86_DM_MASK;
+        delivery_mode = MASK_EXTR(pirq_dpci->gmsi.gflags,
+                                  XEN_DOMCTL_VMSI_X86_DELIV_MASK);
 
         dest_vcpu_id = hvm_girq_dest_2_vcpu_id(d, dest, dest_mode);
         pirq_dpci->gmsi.dest_vcpu_id = dest_vcpu_id;
         spin_unlock(&d->event_lock);
+
+        pirq_dpci->gmsi.posted = false;
+        vcpu = (dest_vcpu_id >= 0) ? d->vcpu[dest_vcpu_id] : NULL;
+        if ( iommu_intpost )
+        {
+            if ( delivery_mode == dest_LowestPrio )
+                vcpu = vector_hashing_dest(d, dest, dest_mode,
+                                           pirq_dpci->gmsi.gvec);
+            if ( vcpu )
+                pirq_dpci->gmsi.posted = true;
+        }
         if ( dest_vcpu_id >= 0 )
             hvm_migrate_pirqs(d->vcpu[dest_vcpu_id]);
 
         /* Use interrupt posting if it is supported. */
         if ( iommu_intpost )
-        {
-            const struct vcpu *vcpu = pi_find_dest_vcpu(d, dest, dest_mode,
-                                          delivery_mode, pirq_dpci->gmsi.gvec);
+            pi_update_irte(vcpu ? &vcpu->arch.hvm_vmx.pi_desc : NULL,
+                           info, pirq_dpci->gmsi.gvec);
 
-            if ( vcpu )
-                pi_update_irte( vcpu, info, pirq_dpci->gmsi.gvec );
-            else
-                dprintk(XENLOG_G_INFO,
-                        "%pv: deliver interrupt in remapping mode,gvec:%02x\n",
-                        vcpu, pirq_dpci->gmsi.gvec);
+        if ( pt_irq_bind->u.msi.gflags & XEN_DOMCTL_VMSI_X86_UNMASKED )
+        {
+            unsigned long flags;
+            struct irq_desc *desc = pirq_spin_lock_irq_desc(info, &flags);
+
+            if ( !desc )
+            {
+                pt_irq_destroy_bind(d, pt_irq_bind);
+                return -EINVAL;
+            }
+
+            guest_mask_msi_irq(desc, false);
+            spin_unlock_irqrestore(&desc->lock, flags);
         }
 
         break;
@@ -465,35 +463,58 @@ int pt_irq_create_bind(
     case PT_IRQ_TYPE_PCI:
     case PT_IRQ_TYPE_MSI_TRANSLATE:
     {
-        unsigned int bus = pt_irq_bind->u.pci.bus;
-        unsigned int device = pt_irq_bind->u.pci.device;
-        unsigned int intx = pt_irq_bind->u.pci.intx;
-        unsigned int guest_gsi = hvm_pci_intx_gsi(device, intx);
-        unsigned int link = hvm_pci_intx_link(device, intx);
-        struct dev_intx_gsi_link *digl = xmalloc(struct dev_intx_gsi_link);
-        struct hvm_girq_dpci_mapping *girq =
-            xmalloc(struct hvm_girq_dpci_mapping);
+        struct dev_intx_gsi_link *digl = NULL;
+        struct hvm_girq_dpci_mapping *girq = NULL;
+        unsigned int guest_gsi;
 
-        if ( !digl || !girq )
+        /*
+         * Mapping GSIs for the hardware domain is different than doing it for
+         * an unpriviledged guest, the hardware domain is only allowed to
+         * identity map GSIs, and as such all the data in the u.pci union is
+         * discarded.
+         */
+        if ( hvm_irq_dpci )
         {
-            spin_unlock(&d->event_lock);
-            xfree(girq);
-            xfree(digl);
-            return -ENOMEM;
+            unsigned int link;
+
+            digl = xmalloc(struct dev_intx_gsi_link);
+            girq = xmalloc(struct hvm_girq_dpci_mapping);
+
+            if ( !digl || !girq )
+            {
+                spin_unlock(&d->event_lock);
+                xfree(girq);
+                xfree(digl);
+                return -ENOMEM;
+            }
+
+            girq->bus = digl->bus = pt_irq_bind->u.pci.bus;
+            girq->device = digl->device = pt_irq_bind->u.pci.device;
+            girq->intx = digl->intx = pt_irq_bind->u.pci.intx;
+            list_add_tail(&digl->list, &pirq_dpci->digl_list);
+
+            guest_gsi = hvm_pci_intx_gsi(digl->device, digl->intx);
+            link = hvm_pci_intx_link(digl->device, digl->intx);
+
+            hvm_irq_dpci->link_cnt[link]++;
+
+            girq->machine_gsi = pirq;
+            list_add_tail(&girq->list, &hvm_irq_dpci->girq[guest_gsi]);
         }
+        else
+        {
+            ASSERT(is_hardware_domain(d));
 
-        hvm_irq_dpci->link_cnt[link]++;
+            /* MSI_TRANSLATE is not supported for the hardware domain. */
+            if ( pt_irq_bind->irq_type != PT_IRQ_TYPE_PCI ||
+                 pirq >= hvm_domain_irq(d)->nr_gsis )
+            {
+                spin_unlock(&d->event_lock);
 
-        digl->bus = bus;
-        digl->device = device;
-        digl->intx = intx;
-        list_add_tail(&digl->list, &pirq_dpci->digl_list);
-
-        girq->bus = bus;
-        girq->device = device;
-        girq->intx = intx;
-        girq->machine_gsi = pirq;
-        list_add_tail(&girq->list, &hvm_irq_dpci->girq[guest_gsi]);
+                return -EINVAL;
+            }
+            guest_gsi = pirq;
+        }
 
         /* Bind the same mirq once in the same domain */
         if ( !(pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) )
@@ -515,7 +536,29 @@ int pt_irq_create_bind(
                 pirq_dpci->flags = HVM_IRQ_DPCI_MAPPED |
                                    HVM_IRQ_DPCI_MACH_PCI |
                                    HVM_IRQ_DPCI_GUEST_PCI;
-                share = BIND_PIRQ__WILL_SHARE;
+                if ( !is_hardware_domain(d) )
+                    share = BIND_PIRQ__WILL_SHARE;
+                else
+                {
+                    int mask = vioapic_get_mask(d, guest_gsi);
+                    int trigger_mode = vioapic_get_trigger_mode(d, guest_gsi);
+
+                    if ( mask < 0 || trigger_mode < 0 )
+                    {
+                        spin_unlock(&d->event_lock);
+
+                        ASSERT_UNREACHABLE();
+                        return -EINVAL;
+                    }
+                    pirq_dpci->flags |= HVM_IRQ_DPCI_IDENTITY_GSI;
+                    /*
+                     * Check if the corresponding vIO APIC pin is configured
+                     * level or edge trigger, level triggered interrupts will
+                     * be marked as shareable.
+                     */
+                    ASSERT(!mask);
+                    share = trigger_mode;
+                }
             }
 
             /* Init timer before binding */
@@ -532,9 +575,16 @@ int pt_irq_create_bind(
                  * IRQ_GUEST is not set. As such we can reset 'dom' directly.
                  */
                 pirq_dpci->dom = NULL;
-                list_del(&girq->list);
-                list_del(&digl->list);
-                hvm_irq_dpci->link_cnt[link]--;
+                if ( hvm_irq_dpci )
+                {
+                    unsigned int link;
+
+                    ASSERT(girq && digl);
+                    list_del(&girq->list);
+                    list_del(&digl->list);
+                    link = hvm_pci_intx_link(digl->device, digl->intx);
+                    hvm_irq_dpci->link_cnt[link]--;
+                }
                 pirq_dpci->flags = 0;
                 pirq_cleanup_check(info, d);
                 spin_unlock(&d->event_lock);
@@ -547,10 +597,17 @@ int pt_irq_create_bind(
         spin_unlock(&d->event_lock);
 
         if ( iommu_verbose )
-            printk(XENLOG_G_INFO
-                   "d%d: bind: m_gsi=%u g_gsi=%u dev=%02x.%02x.%u intx=%u\n",
-                   d->domain_id, pirq, guest_gsi, bus,
-                   PCI_SLOT(device), PCI_FUNC(device), intx);
+        {
+            char buf[24] = "";
+
+            if ( digl )
+                snprintf(buf, ARRAY_SIZE(buf), " dev=%02x.%02x.%u intx=%u",
+                         digl->bus, PCI_SLOT(digl->device),
+                         PCI_FUNC(digl->device), digl->intx);
+
+            printk(XENLOG_G_INFO "d%d: bind: m_gsi=%u g_gsi=%u%s\n",
+                   d->domain_id, pirq, guest_gsi, buf);
+        }
         break;
     }
 
@@ -563,7 +620,7 @@ int pt_irq_create_bind(
 }
 
 int pt_irq_destroy_bind(
-    struct domain *d, xen_domctl_bind_pt_irq_t *pt_irq_bind)
+    struct domain *d, const struct xen_domctl_bind_pt_irq *pt_irq_bind)
 {
     struct hvm_irq_dpci *hvm_irq_dpci;
     struct hvm_pirq_dpci *pirq_dpci;
@@ -597,7 +654,7 @@ int pt_irq_destroy_bind(
 
     hvm_irq_dpci = domain_get_irq_dpci(d);
 
-    if ( hvm_irq_dpci == NULL )
+    if ( !hvm_irq_dpci && !is_hardware_domain(d) )
     {
         spin_unlock(&d->event_lock);
         return -EINVAL;
@@ -606,7 +663,7 @@ int pt_irq_destroy_bind(
     pirq = pirq_info(d, machine_gsi);
     pirq_dpci = pirq_dpci(pirq);
 
-    if ( pt_irq_bind->irq_type != PT_IRQ_TYPE_MSI )
+    if ( hvm_irq_dpci && pt_irq_bind->irq_type != PT_IRQ_TYPE_MSI )
     {
         unsigned int bus = pt_irq_bind->u.pci.bus;
         unsigned int device = pt_irq_bind->u.pci.device;
@@ -656,6 +713,8 @@ int pt_irq_destroy_bind(
         else
             what = "bogus";
     }
+    else if ( pirq_dpci && pirq_dpci->gmsi.posted )
+        pi_update_irte(NULL, pirq, 0);
 
     if ( pirq_dpci && (pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) &&
          list_empty(&pirq_dpci->digl_list) )
@@ -679,11 +738,15 @@ int pt_irq_destroy_bind(
     if ( what && iommu_verbose )
     {
         unsigned int device = pt_irq_bind->u.pci.device;
+        char buf[24] = "";
 
-        printk(XENLOG_G_INFO
-               "d%d %s unmap: m_irq=%u dev=%02x:%02x.%u intx=%u\n",
-               d->domain_id, what, machine_gsi, pt_irq_bind->u.pci.bus,
-               PCI_SLOT(device), PCI_FUNC(device), pt_irq_bind->u.pci.intx);
+        if ( hvm_irq_dpci )
+            snprintf(buf, ARRAY_SIZE(buf), " dev=%02x.%02x.%u intx=%u",
+                     pt_irq_bind->u.pci.bus, PCI_SLOT(device),
+                     PCI_FUNC(device), pt_irq_bind->u.pci.intx);
+
+        printk(XENLOG_G_INFO "d%d %s unmap: m_irq=%u%s\n",
+               d->domain_id, what, machine_gsi, buf);
     }
 
     return 0;
@@ -695,14 +758,14 @@ void pt_pirq_init(struct domain *d, struct hvm_pirq_dpci *dpci)
     dpci->gmsi.dest_vcpu_id = -1;
 }
 
-bool_t pt_pirq_cleanup_check(struct hvm_pirq_dpci *dpci)
+bool pt_pirq_cleanup_check(struct hvm_pirq_dpci *dpci)
 {
     if ( !dpci->flags && !pt_pirq_softirq_active(dpci) )
     {
         dpci->dom = NULL;
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 int pt_pirq_iterate(struct domain *d,
@@ -737,8 +800,10 @@ int hvm_do_IRQ_dpci(struct domain *d, struct pirq *pirq)
     struct hvm_irq_dpci *dpci = domain_get_irq_dpci(d);
     struct hvm_pirq_dpci *pirq_dpci = pirq_dpci(pirq);
 
-    if ( !iommu_enabled || !dpci || !pirq_dpci ||
-         !(pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) )
+    ASSERT(is_hvm_domain(d));
+
+    if ( !iommu_enabled || (!is_hardware_domain(d) && !dpci) ||
+         !pirq_dpci || !(pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) )
         return 0;
 
     pirq_dpci->masked = 1;
@@ -772,8 +837,9 @@ static int _hvm_dpci_msi_eoi(struct domain *d,
     if ( (pirq_dpci->flags & HVM_IRQ_DPCI_MACH_MSI) &&
          (pirq_dpci->gmsi.gvec == vector) )
     {
-        int dest = pirq_dpci->gmsi.gflags & VMSI_DEST_ID_MASK;
-        int dest_mode = !!(pirq_dpci->gmsi.gflags & VMSI_DM_MASK);
+        unsigned int dest = MASK_EXTR(pirq_dpci->gmsi.gflags,
+                                      XEN_DOMCTL_VMSI_X86_DEST_ID_MASK);
+        bool dest_mode = pirq_dpci->gmsi.gflags & XEN_DOMCTL_VMSI_X86_DM_MASK;
 
         if ( vlapic_match_dest(vcpu_vlapic(current), NULL, 0, dest,
                                dest_mode) )
@@ -788,7 +854,7 @@ static int _hvm_dpci_msi_eoi(struct domain *d,
 
 void hvm_dpci_msi_eoi(struct domain *d, int vector)
 {
-    if ( !iommu_enabled || !d->arch.hvm_domain.irq.dpci )
+    if ( !iommu_enabled || !hvm_domain_irq(d)->dpci )
        return;
 
     spin_lock(&d->event_lock);
@@ -798,7 +864,7 @@ void hvm_dpci_msi_eoi(struct domain *d, int vector)
 
 static void hvm_dirq_assist(struct domain *d, struct hvm_pirq_dpci *pirq_dpci)
 {
-    if ( unlikely(!d->arch.hvm_domain.irq.dpci) )
+    if ( unlikely(!hvm_domain_irq(d)->dpci) && !is_hardware_domain(d) )
     {
         ASSERT_UNREACHABLE();
         return;
@@ -830,7 +896,14 @@ static void hvm_dirq_assist(struct domain *d, struct hvm_pirq_dpci *pirq_dpci)
 
         list_for_each_entry ( digl, &pirq_dpci->digl_list, list )
         {
+            ASSERT(!(pirq_dpci->flags & HVM_IRQ_DPCI_IDENTITY_GSI));
             hvm_pci_intx_assert(d, digl->device, digl->intx);
+            pirq_dpci->pending++;
+        }
+
+        if ( pirq_dpci->flags & HVM_IRQ_DPCI_IDENTITY_GSI )
+        {
+            hvm_gsi_assert(d, pirq->pirq);
             pirq_dpci->pending++;
         }
 
@@ -855,15 +928,16 @@ static void hvm_dirq_assist(struct domain *d, struct hvm_pirq_dpci *pirq_dpci)
     spin_unlock(&d->event_lock);
 }
 
-static void __hvm_dpci_eoi(struct domain *d,
-                           const struct hvm_girq_dpci_mapping *girq,
-                           const union vioapic_redir_entry *ent)
+static void hvm_pirq_eoi(struct pirq *pirq,
+                         const union vioapic_redir_entry *ent)
 {
-    struct pirq *pirq = pirq_info(d, girq->machine_gsi);
     struct hvm_pirq_dpci *pirq_dpci;
 
-    if ( !hvm_domain_use_pirq(d, pirq) )
-        hvm_pci_intx_deassert(d, girq->device, girq->intx);
+    if ( !pirq )
+    {
+        ASSERT_UNREACHABLE();
+        return;
+    }
 
     pirq_dpci = pirq_dpci(pirq);
 
@@ -880,6 +954,31 @@ static void __hvm_dpci_eoi(struct domain *d,
     pirq_guest_eoi(pirq);
 }
 
+static void __hvm_dpci_eoi(struct domain *d,
+                           const struct hvm_girq_dpci_mapping *girq,
+                           const union vioapic_redir_entry *ent)
+{
+    struct pirq *pirq = pirq_info(d, girq->machine_gsi);
+
+    if ( !hvm_domain_use_pirq(d, pirq) )
+        hvm_pci_intx_deassert(d, girq->device, girq->intx);
+
+    hvm_pirq_eoi(pirq, ent);
+}
+
+static void hvm_gsi_eoi(struct domain *d, unsigned int gsi,
+                        const union vioapic_redir_entry *ent)
+{
+    struct pirq *pirq = pirq_info(d, gsi);
+
+    /* Check if GSI is actually mapped. */
+    if ( !pirq_dpci(pirq) )
+        return;
+
+    hvm_gsi_deassert(d, gsi);
+    hvm_pirq_eoi(pirq, ent);
+}
+
 void hvm_dpci_eoi(struct domain *d, unsigned int guest_gsi,
                   const union vioapic_redir_entry *ent)
 {
@@ -888,6 +987,13 @@ void hvm_dpci_eoi(struct domain *d, unsigned int guest_gsi,
 
     if ( !iommu_enabled )
         return;
+
+    if ( is_hardware_domain(d) )
+    {
+        spin_lock(&d->event_lock);
+        hvm_gsi_eoi(d, guest_gsi, ent);
+        goto unlock;
+    }
 
     if ( guest_gsi < NR_ISAIRQS )
     {

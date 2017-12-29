@@ -60,17 +60,17 @@ int xendevicemodel_create_ioreq_server(
  * @parm dmod a handle to an open devicemodel interface.
  * @parm domid the domain id to be serviced
  * @parm id the IOREQ Server id.
- * @parm ioreq_pfn pointer to a xen_pfn_t to receive the synchronous ioreq
- *                  gmfn
- * @parm bufioreq_pfn pointer to a xen_pfn_t to receive the buffered ioreq
- *                    gmfn
+ * @parm ioreq_gfn pointer to a xen_pfn_t to receive the synchronous ioreq
+ *                  gfn
+ * @parm bufioreq_gfn pointer to a xen_pfn_t to receive the buffered ioreq
+ *                    gfn
  * @parm bufioreq_port pointer to a evtchn_port_t to receive the buffered
  *                     ioreq event channel
  * @return 0 on success, -1 on failure.
  */
 int xendevicemodel_get_ioreq_server_info(
     xendevicemodel_handle *dmod, domid_t domid, ioservid_t id,
-    xen_pfn_t *ioreq_pfn, xen_pfn_t *bufioreq_pfn,
+    xen_pfn_t *ioreq_gfn, xen_pfn_t *bufioreq_gfn,
     evtchn_port_t *bufioreq_port);
 
 /**
@@ -102,6 +102,24 @@ int xendevicemodel_map_io_range_to_ioreq_server(
 int xendevicemodel_unmap_io_range_from_ioreq_server(
     xendevicemodel_handle *dmod, domid_t domid, ioservid_t id, int is_mmio,
     uint64_t start, uint64_t end);
+
+/**
+ * This function registers/deregisters a memory type for emulation.
+ *
+ * @parm dmod a handle to an open devicemodel interface.
+ * @parm domid the domain id to be serviced.
+ * @parm id the IOREQ Server id.
+ * @parm type the memory type to be emulated. For now, only HVMMEM_ioreq_server
+ *            is supported, and in the future new types can be introduced, e.g.
+ *            HVMMEM_ioreq_serverX mapped to ioreq server X.
+ * @parm flags operations to be emulated; 0 for unmap. For now, only write
+ *             operations will be emulated and can be extended to emulate
+ *             read ones in the future.
+ * @return 0 on success, -1 on failure.
+ */
+int xendevicemodel_map_mem_type_to_ioreq_server(
+    xendevicemodel_handle *dmod, domid_t domid, ioservid_t id, uint16_t type,
+    uint32_t flags);
 
 /**
  * This function registers a PCI device for config space emulation.
@@ -150,7 +168,7 @@ int xendevicemodel_destroy_ioreq_server(
  * This function sets IOREQ Server state. An IOREQ Server
  * will not be passed emulation requests until it is in
  * the enabled state.
- * Note that the contents of the ioreq_pfn and bufioreq_pfn are
+ * Note that the contents of the ioreq_gfn and bufioreq_gfn are
  * not meaningful until the IOREQ Server is in the enabled state.
  *
  * @parm dmod a handle to an open devicemodel interface.
@@ -236,8 +254,8 @@ int xendevicemodel_track_dirty_vram(
     uint32_t nr, unsigned long *dirty_bitmap);
 
 /**
- * This function notifies the hypervisor that a set of domain pages
- * have been modified.
+ * This function notifies the hypervisor that a set of contiguous
+ * domain pages have been modified.
  *
  * @parm dmod a handle to an open devicemodel interface.
  * @parm domid the domain id to be serviced
@@ -248,6 +266,21 @@ int xendevicemodel_track_dirty_vram(
 int xendevicemodel_modified_memory(
     xendevicemodel_handle *dmod, domid_t domid, uint64_t first_pfn,
     uint32_t nr);
+
+/**
+ * This function notifies the hypervisor that a set of discontiguous
+ * domain pages have been modified.
+ *
+ * @parm dmod a handle to an open devicemodel interface.
+ * @parm domid the domain id to be serviced
+ * @parm extents an array of extent structs, which each hold
+                 a start_pfn and nr (number of pfns).
+ * @parm nr the number of extents in the array
+ * @return 0 on success, -1 on failure.
+ */
+int xendevicemodel_modified_memory_bulk(
+    xendevicemodel_handle *dmod, domid_t domid,
+    struct xen_dm_op_modified_memory_extent extents[], uint32_t nr);
 
 /**
  * This function notifies the hypervisor that a set of domain pages
@@ -282,6 +315,15 @@ int xendevicemodel_set_mem_type(
 int xendevicemodel_inject_event(
     xendevicemodel_handle *dmod, domid_t domid, int vcpu, uint8_t vector,
     uint8_t type, uint32_t error_code, uint8_t insn_len, uint64_t cr2);
+
+/**
+ * Shuts the domain down.
+ *
+ * @parm reason usually enum sched_shutdown_reason, see xen/sched.h
+ * @return 0 on success, -1 on failure.
+ */
+int xendevicemodel_shutdown(
+    xendevicemodel_handle *dmod, domid_t domid, unsigned int reason);
 
 /**
  * This function restricts the use of this handle to the specified

@@ -27,7 +27,7 @@ static bool __init probe_intel_cpuid_faulting(void)
 
 	expected_levelling_cap |= LCAP_faulting;
 	levelling_caps |=  LCAP_faulting;
-	__set_bit(X86_FEATURE_CPUID_FAULTING, boot_cpu_data.x86_capability);
+	setup_force_cpu_cap(X86_FEATURE_CPUID_FAULTING);
 	return 1;
 }
 
@@ -176,7 +176,7 @@ static void intel_ctxt_switch_levelling(const struct vcpu *next)
 		 */
 		set_cpuid_faulting(nextd && !is_control_domain(nextd) &&
 				   (is_pv_domain(nextd) ||
-				    next->arch.cpuid_faulting));
+				    next->arch.msr->misc_features_enables.cpuid_faulting));
 		return;
 	}
 
@@ -319,9 +319,6 @@ static void early_init_intel(struct cpuinfo_x86 *c)
 
 	if (c == &boot_cpu_data)
 		intel_init_levelling();
-
-	if (test_bit(X86_FEATURE_CPUID_FAULTING, boot_cpu_data.x86_capability))
-		__set_bit(X86_FEATURE_CPUID_FAULTING, c->x86_capability);
 
 	intel_ctxt_switch_levelling(NULL);
 }

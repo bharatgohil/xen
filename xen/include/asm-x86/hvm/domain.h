@@ -36,7 +36,7 @@
 #include <public/hvm/dm_op.h>
 
 struct hvm_ioreq_page {
-    unsigned long gmfn;
+    unsigned long gfn;
     struct page_info *page;
     void *va;
 };
@@ -45,7 +45,7 @@ struct hvm_ioreq_vcpu {
     struct list_head list_entry;
     struct vcpu      *vcpu;
     evtchn_port_t    ioreq_evtchn;
-    bool_t           pending;
+    bool             pending;
 };
 
 #define NR_IO_RANGE_TYPES (XEN_DMOP_IO_RANGE_PCI + 1)
@@ -69,8 +69,8 @@ struct hvm_ioreq_server {
     spinlock_t             bufioreq_lock;
     evtchn_port_t          bufioreq_evtchn;
     struct rangeset        *range[NR_IO_RANGE_TYPES];
-    bool_t                 enabled;
-    bool_t                 bufioreq_atomic;
+    bool                   enabled;
+    bool                   bufioreq_atomic;
 };
 
 /*
@@ -105,7 +105,7 @@ struct hvm_domain {
     struct {
         unsigned long base;
         unsigned long mask;
-    } ioreq_gmfn;
+    } ioreq_gfn;
 
     /* Lock protects all other values in the sub-struct and the default */
     struct {
@@ -125,9 +125,10 @@ struct hvm_domain {
 
     /* Lock protects access to irq, vpic and vioapic. */
     spinlock_t             irq_lock;
-    struct hvm_irq         irq;
+    struct hvm_irq        *irq;
     struct hvm_hw_vpic     vpic[2]; /* 0=master; 1=slave */
-    struct hvm_vioapic    *vioapic;
+    struct hvm_vioapic    **vioapic;
+    unsigned int           nr_vioapics;
     struct hvm_hw_stdvga   stdvga;
 
     /*
@@ -179,6 +180,9 @@ struct hvm_domain {
     uint64_t tsc_scaling_ratio;
 
     unsigned long *io_bitmap;
+
+    /* List of guest to machine IO ports mapping. */
+    struct list_head g2m_ioport_list;
 
     /* List of permanently write-mapped pages. */
     struct {

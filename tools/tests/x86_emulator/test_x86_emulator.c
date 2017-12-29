@@ -3,14 +3,14 @@
 #include <stdio.h>
 #include <sys/mman.h>
 
-#include "x86_emulate.h"
+#include "x86-emulate.h"
 #include "blowfish.h"
 #include "sse.h"
 #include "sse2.h"
 #include "sse4.h"
-#include "sse-avx.h"
 #include "sse2-avx.h"
 #include "sse4-avx.h"
+#include "avx.h"
 
 #define verbose false /* Switch to true for far more logging. */
 
@@ -44,7 +44,6 @@ static bool simd_check_avx(void)
 {
     return cpu_has_avx;
 }
-#define simd_check_sse_avx   simd_check_avx
 #define simd_check_sse2_avx  simd_check_avx
 #define simd_check_sse4_avx  simd_check_avx
 
@@ -122,12 +121,6 @@ static const struct {
     SIMD(SSE4 packed u32,        sse4,      16u4),
     SIMD(SSE4 packed s64,        sse4,      16i8),
     SIMD(SSE4 packed u64,        sse4,      16u8),
-    SIMD(SSE/AVX scalar single,  sse_avx,     f4),
-    SIMD(SSE/AVX packed single,  sse_avx,   16f4),
-    SIMD(SSE2/AVX scalar single, sse2_avx,    f4),
-    SIMD(SSE2/AVX packed single, sse2_avx,  16f4),
-    SIMD(SSE2/AVX scalar double, sse2_avx,    f8),
-    SIMD(SSE2/AVX packed double, sse2_avx,  16f8),
     SIMD(SSE2/AVX packed s8,     sse2_avx,  16i1),
     SIMD(SSE2/AVX packed u8,     sse2_avx,  16u1),
     SIMD(SSE2/AVX packed s16,    sse2_avx,  16i2),
@@ -136,10 +129,6 @@ static const struct {
     SIMD(SSE2/AVX packed u32,    sse2_avx,  16u4),
     SIMD(SSE2/AVX packed s64,    sse2_avx,  16i8),
     SIMD(SSE2/AVX packed u64,    sse2_avx,  16u8),
-    SIMD(SSE4/AVX scalar single, sse4_avx,    f4),
-    SIMD(SSE4/AVX packed single, sse4_avx,  16f4),
-    SIMD(SSE4/AVX scalar double, sse4_avx,    f8),
-    SIMD(SSE4/AVX packed double, sse4_avx,  16f8),
     SIMD(SSE4/AVX packed s8,     sse4_avx,  16i1),
     SIMD(SSE4/AVX packed u8,     sse4_avx,  16u1),
     SIMD(SSE4/AVX packed s16,    sse4_avx,  16i2),
@@ -148,6 +137,12 @@ static const struct {
     SIMD(SSE4/AVX packed u32,    sse4_avx,  16u4),
     SIMD(SSE4/AVX packed s64,    sse4_avx,  16i8),
     SIMD(SSE4/AVX packed u64,    sse4_avx,  16u8),
+    SIMD(AVX scalar single,      avx,         f4),
+    SIMD(AVX 128bit single,      avx,       16f4),
+    SIMD(AVX 256bit single,      avx,       32f4),
+    SIMD(AVX scalar double,      avx,         f8),
+    SIMD(AVX 128bit double,      avx,       16f8),
+    SIMD(AVX 256bit double,      avx,       32f8),
 #undef SIMD_
 #undef SIMD
 };
@@ -155,7 +150,7 @@ static const struct {
 static unsigned int bytes_read;
 
 static int read(
-    unsigned int seg,
+    enum x86_segment seg,
     unsigned long offset,
     void *p_data,
     unsigned int bytes,
@@ -210,7 +205,7 @@ static int read(
 }
 
 static int fetch(
-    unsigned int seg,
+    enum x86_segment seg,
     unsigned long offset,
     void *p_data,
     unsigned int bytes,
@@ -224,7 +219,7 @@ static int fetch(
 }
 
 static int write(
-    unsigned int seg,
+    enum x86_segment seg,
     unsigned long offset,
     void *p_data,
     unsigned int bytes,
@@ -240,7 +235,7 @@ static int write(
 }
 
 static int cmpxchg(
-    unsigned int seg,
+    enum x86_segment seg,
     unsigned long offset,
     void *old,
     void *new,
@@ -264,7 +259,7 @@ static int read_segment(
     if ( !is_x86_user_segment(seg) )
         return X86EMUL_UNHANDLEABLE;
     memset(reg, 0, sizeof(*reg));
-    reg->attr.fields.p = 1;
+    reg->p = 1;
     return X86EMUL_OKAY;
 }
 
@@ -319,6 +314,7 @@ int main(int argc, char **argv)
     ctxt.regs = &regs;
     ctxt.force_writeback = 0;
     ctxt.vendor    = X86_VENDOR_UNKNOWN;
+    ctxt.lma       = sizeof(void *) == 8;
     ctxt.addr_size = 8 * sizeof(void *);
     ctxt.sp_size   = 8 * sizeof(void *);
 
@@ -781,6 +777,31 @@ int main(int argc, char **argv)
         goto fail;
     printf("okay\n");
 #endif
+
+    printf("%-40s", "Testing shld $1,%ecx,(%edx)...");
+    res[0]      = 0x12345678;
+    regs.edx    = (unsigned long)res;
+    regs.ecx    = 0x9abcdef0;
+    instr[0] = 0x0f; instr[1] = 0xa4; instr[2] = 0x0a; instr[3] = 0x01;
+    for ( i = 0; i < 0x20; ++i )
+    {
+        uint32_t r = res[0];
+        const uint32_t m = X86_EFLAGS_ARITH_MASK & ~X86_EFLAGS_AF;
+        unsigned long f;
+
+        asm ( "shld $1,%2,%0; pushf; pop %1"
+              : "+rm" (r), "=rm" (f) : "r" ((uint32_t)regs.ecx) );
+        regs.eflags = f ^ m;
+        regs.eip    = (unsigned long)&instr[0];
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( (rc != X86EMUL_OKAY) ||
+             (regs.eip != (unsigned long)&instr[4]) ||
+             (res[0] != r) ||
+             ((regs.eflags ^ f) & m) )
+            goto fail;
+        regs.ecx <<= 1;
+    }
+    printf("okay\n");
 
     printf("%-40s", "Testing movbe (%ecx),%eax...");
     instr[0] = 0x0f; instr[1] = 0x38; instr[2] = 0xf0; instr[3] = 0x01;
@@ -2835,6 +2856,81 @@ int main(int argc, char **argv)
     else
         printf("skipped\n");
 
+    /*
+     * The following "maskmov" tests are not only making sure the written data
+     * is correct, but verify (by placing operands on the mapping boundaries)
+     * that elements controlled by clear mask bits aren't being accessed.
+     */
+    printf("%-40s", "Testing vmaskmovps %xmm1,%xmm2,(%edx)...");
+    if ( stack_exec && cpu_has_avx )
+    {
+        decl_insn(vmaskmovps);
+
+        asm volatile ( "vxorps %%xmm1, %%xmm1, %%xmm1\n\t"
+                       "vcmpeqss %%xmm1, %%xmm1, %%xmm2\n\t"
+                       put_insn(vmaskmovps, "vmaskmovps %%xmm1, %%xmm2, (%0)")
+                       :: "d" (NULL) );
+
+        memset(res + MMAP_SZ / sizeof(*res) - 8, 0xdb, 32);
+        set_insn(vmaskmovps);
+        regs.edx = (unsigned long)res + MMAP_SZ - 4;
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vmaskmovps) ||
+             res[MMAP_SZ / sizeof(*res) - 1] ||
+             memcmp(res + MMAP_SZ / sizeof(*res) - 8,
+                    res + MMAP_SZ / sizeof(*res) - 4, 12) )
+            goto fail;
+
+        asm volatile ( "vinsertps $0b00110111, %xmm2, %xmm2, %xmm2" );
+        memset(res, 0xdb, 32);
+        set_insn(vmaskmovps);
+        regs.edx = (unsigned long)(res - 3);
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vmaskmovps) ||
+             res[0] || memcmp(res + 1, res + 4, 12) )
+            goto fail;
+
+        printf("okay\n");
+    }
+    else
+        printf("skipped\n");
+
+    printf("%-40s", "Testing vmaskmovpd %xmm1,%xmm2,(%edx)...");
+    if ( stack_exec && cpu_has_avx )
+    {
+        decl_insn(vmaskmovpd);
+
+        asm volatile ( "vxorpd %%xmm1, %%xmm1, %%xmm1\n\t"
+                       "vcmpeqsd %%xmm1, %%xmm1, %%xmm2\n\t"
+                       put_insn(vmaskmovpd, "vmaskmovpd %%xmm1, %%xmm2, (%0)")
+                       :: "d" (NULL) );
+
+        memset(res + MMAP_SZ / sizeof(*res) - 8, 0xdb, 32);
+        set_insn(vmaskmovpd);
+        regs.edx = (unsigned long)res + MMAP_SZ - 8;
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vmaskmovpd) ||
+             res[MMAP_SZ / sizeof(*res) - 1] ||
+             res[MMAP_SZ / sizeof(*res) - 2] ||
+             memcmp(res + MMAP_SZ / sizeof(*res) - 8,
+                    res + MMAP_SZ / sizeof(*res) - 4, 8) )
+            goto fail;
+
+        asm volatile ( "vmovddup %xmm2, %xmm2\n\t"
+                       "vmovsd %xmm1, %xmm2, %xmm2" );
+        memset(res, 0xdb, 32);
+        set_insn(vmaskmovpd);
+        regs.edx = (unsigned long)(res - 2);
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vmaskmovpd) ||
+             res[0] || res[1] || memcmp(res + 2, res + 4, 8) )
+            goto fail;
+
+        printf("okay\n");
+    }
+    else
+        printf("skipped\n");
+
     printf("%-40s", "Testing stmxcsr (%edx)...");
     if ( cpu_has_sse )
     {
@@ -2922,6 +3018,7 @@ int main(int argc, char **argv)
     {
         decl_insn(vzeroupper);
 
+        ctxt.lma = false;
         ctxt.sp_size = ctxt.addr_size = 32;
 
         asm volatile ( "vxorps %xmm2, %xmm2, %xmm3\n"
@@ -2949,6 +3046,7 @@ int main(int argc, char **argv)
             goto fail;
         printf("okay\n");
 
+        ctxt.lma = true;
         ctxt.sp_size = ctxt.addr_size = 64;
     }
     else
@@ -2991,16 +3089,17 @@ int main(int argc, char **argv)
 
     for ( j = 0; j < ARRAY_SIZE(blobs); j++ )
     {
+        if ( blobs[j].check_cpu && !blobs[j].check_cpu() )
+            continue;
+
         if ( !blobs[j].size )
         {
             printf("%-39s n/a\n", blobs[j].name);
             continue;
         }
 
-        if ( blobs[j].check_cpu && !blobs[j].check_cpu() )
-            continue;
-
         memcpy(res, blobs[j].code, blobs[j].size);
+        ctxt.lma = blobs[j].bitness == 64;
         ctxt.addr_size = ctxt.sp_size = blobs[j].bitness;
 
         if ( ctxt.addr_size == sizeof(void *) * CHAR_BIT )

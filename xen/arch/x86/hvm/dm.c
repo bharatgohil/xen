@@ -25,38 +25,72 @@
 
 #include <xsm/xsm.h>
 
-static bool copy_buf_from_guest(const xen_dm_op_buf_t bufs[],
-                                unsigned int nr_bufs, void *dst,
-                                unsigned int idx, size_t dst_size)
-{
-    size_t size;
+struct dmop_args {
+    domid_t domid;
+    unsigned int nr_bufs;
+    /* Reserve enough buf elements for all current hypercalls. */
+    struct xen_dm_op_buf buf[2];
+};
 
-    if ( idx >= nr_bufs )
+static bool _raw_copy_from_guest_buf_offset(void *dst,
+                                            const struct dmop_args *args,
+                                            unsigned int buf_idx,
+                                            size_t offset_bytes,
+                                            size_t dst_bytes)
+{
+    size_t buf_bytes;
+
+    if ( buf_idx >= args->nr_bufs )
         return false;
 
-    memset(dst, 0, dst_size);
+    buf_bytes =  args->buf[buf_idx].size;
 
-    size = min_t(size_t, dst_size, bufs[idx].size);
-
-    return !copy_from_guest(dst, bufs[idx].h, size);
-}
-
-static bool copy_buf_to_guest(const xen_dm_op_buf_t bufs[],
-                              unsigned int nr_bufs, unsigned int idx,
-                              const void *src, size_t src_size)
-{
-    size_t size;
-
-    if ( idx >= nr_bufs )
+    if ( (offset_bytes + dst_bytes) < offset_bytes ||
+         (offset_bytes + dst_bytes) > buf_bytes )
         return false;
 
-    size = min_t(size_t, bufs[idx].size, src_size);
-
-    return !copy_to_guest(bufs[idx].h, src, size);
+    return !copy_from_guest_offset(dst, args->buf[buf_idx].h,
+                                   offset_bytes, dst_bytes);
 }
+
+static bool _raw_copy_to_guest_buf_offset(const struct dmop_args *args,
+                                          unsigned int buf_idx,
+                                          size_t offset_bytes,
+                                          const void *src,
+                                          size_t src_bytes)
+{
+    size_t buf_bytes;
+
+    if ( buf_idx >= args->nr_bufs )
+        return false;
+
+    buf_bytes = args->buf[buf_idx].size;
+
+
+    if ( (offset_bytes + src_bytes) < offset_bytes ||
+         (offset_bytes + src_bytes) > buf_bytes )
+        return false;
+
+    return !copy_to_guest_offset(args->buf[buf_idx].h, offset_bytes,
+                                 src, src_bytes);
+}
+
+#define COPY_FROM_GUEST_BUF_OFFSET(dst, bufs, buf_idx, offset_bytes) \
+    _raw_copy_from_guest_buf_offset(&(dst), bufs, buf_idx, offset_bytes, \
+                                    sizeof(dst))
+
+#define COPY_TO_GUEST_BUF_OFFSET(bufs, buf_idx, offset_bytes, src) \
+    _raw_copy_to_guest_buf_offset(bufs, buf_idx, offset_bytes, \
+                                  &(src), sizeof(src))
+
+#define COPY_FROM_GUEST_BUF(dst, bufs, buf_idx) \
+    COPY_FROM_GUEST_BUF_OFFSET(dst, bufs, buf_idx, 0)
+
+#define COPY_TO_GUEST_BUF(bufs, buf_idx, src) \
+    COPY_TO_GUEST_BUF_OFFSET(bufs, buf_idx, 0, src)
 
 static int track_dirty_vram(struct domain *d, xen_pfn_t first_pfn,
-                            unsigned int nr, struct xen_dm_op_buf *buf)
+                            unsigned int nr, const struct xen_dm_op_buf *buf)
 {
     if ( nr > (GB(1) >> PAGE_SHIFT) )
         return -EINVAL;
@@ -109,7 +143,7 @@ static int set_isa_irq_level(struct domain *d, uint8_t isa_irq,
         hvm_isa_irq_deassert(d, isa_irq);
         break;
     case 1:
-        hvm_isa_irq_assert(d, isa_irq);
+        hvm_isa_irq_assert(d, isa_irq, NULL);
         break;
     default:
         return -EINVAL;
@@ -119,63 +153,112 @@ static int set_isa_irq_level(struct domain *d, uint8_t isa_irq,
 }
 
 static int modified_memory(struct domain *d,
-                           struct xen_dm_op_modified_memory *data)
+                           const struct dmop_args *bufs,
+                           struct xen_dm_op_modified_memory *header)
 {
-    xen_pfn_t last_pfn = data->first_pfn + data->nr - 1;
-    unsigned int iter = 0;
-    int rc = 0;
+#define EXTENTS_BUFFER 1
 
-    if ( (data->first_pfn > last_pfn) ||
-         (last_pfn > domain_get_maximum_gpfn(d)) )
-        return -EINVAL;
+    /* Process maximum of 256 pfns before checking for continuation. */
+    const unsigned int cont_check_interval = 0x100;
+    unsigned int *rem_extents =  &header->nr_extents;
+    unsigned int batch_rem_pfns = cont_check_interval;
+    /* Used for continuation. */
+    unsigned int *pfns_done = &header->opaque;
 
     if ( !paging_mode_log_dirty(d) )
         return 0;
 
-    while ( iter < data->nr )
+    if ( (bufs->buf[EXTENTS_BUFFER].size /
+          sizeof(struct xen_dm_op_modified_memory_extent)) <
+         *rem_extents )
+        return -EINVAL;
+
+    while ( *rem_extents > 0 )
     {
-        unsigned long pfn = data->first_pfn + iter;
-        struct page_info *page;
+        struct xen_dm_op_modified_memory_extent extent;
+        unsigned int batch_nr;
+        xen_pfn_t pfn, end_pfn;
 
-        page = get_page_from_gfn(d, pfn, NULL, P2M_UNSHARE);
-        if ( page )
+        if ( !COPY_FROM_GUEST_BUF_OFFSET(extent, bufs, EXTENTS_BUFFER,
+                                         (*rem_extents - 1) * sizeof(extent)) )
+            return -EFAULT;
+
+        if ( extent.pad )
+            return -EINVAL;
+
+        end_pfn = extent.first_pfn + extent.nr;
+
+        if ( end_pfn <= extent.first_pfn ||
+             end_pfn > domain_get_maximum_gpfn(d) )
+            return -EINVAL;
+
+        if ( *pfns_done >= extent.nr )
+            return -EINVAL;
+
+        pfn = extent.first_pfn + *pfns_done;
+        batch_nr = extent.nr - *pfns_done;
+
+        if ( batch_nr > batch_rem_pfns )
         {
-            mfn_t gmfn = _mfn(page_to_mfn(page));
-
-            paging_mark_dirty(d, gmfn);
-            /*
-             * These are most probably not page tables any more
-             * don't take a long time and don't die either.
-             */
-            sh_remove_shadows(d, gmfn, 1, 0);
-            put_page(page);
+            batch_nr = batch_rem_pfns;
+            *pfns_done += batch_nr;
+            end_pfn = pfn + batch_nr;
+        }
+        else
+        {
+            (*rem_extents)--;
+            *pfns_done = 0;
         }
 
-        iter++;
+        batch_rem_pfns -= batch_nr;
+
+        for ( ; pfn < end_pfn; pfn++ )
+        {
+            struct page_info *page;
+
+            page = get_page_from_gfn(d, pfn, NULL, P2M_UNSHARE);
+            if ( page )
+            {
+                mfn_t gmfn = _mfn(page_to_mfn(page));
+
+                paging_mark_dirty(d, gmfn);
+                /*
+                 * These are most probably not page tables any more
+                 * don't take a long time and don't die either.
+                 */
+                sh_remove_shadows(d, gmfn, 1, 0);
+                put_page(page);
+            }
+        }
 
         /*
-         * Check for continuation every 256th iteration and if the
-         * iteration is not the last.
+         * After a full batch of cont_check_interval pfns
+         * have been processed, and there are still extents
+         * remaining to process, check for continuation.
          */
-        if ( (iter < data->nr) && ((iter & 0xff) == 0) &&
-             hypercall_preempt_check() )
+        if ( (batch_rem_pfns == 0) && (*rem_extents > 0) )
         {
-            data->first_pfn += iter;
-            data->nr -= iter;
+            if ( hypercall_preempt_check() )
+                return -ERESTART;
 
-            rc = -ERESTART;
-            break;
+            batch_rem_pfns = cont_check_interval;
         }
     }
+    return 0;
 
-    return rc;
+#undef EXTENTS_BUFFER
 }
 
 static bool allow_p2m_type_change(p2m_type_t old, p2m_type_t new)
 {
+    if ( new == p2m_ioreq_server )
+        return old == p2m_ram_rw;
+
+    if ( old == p2m_ioreq_server )
+        return new == p2m_ram_rw;
+
     return p2m_is_ram(old) ||
-           (p2m_is_hole(old) && new == p2m_mmio_dm) ||
-           (old == p2m_ioreq_server && new == p2m_ram_rw);
+           (p2m_is_hole(old) && new == p2m_mmio_dm);
 }
 
 static int set_mem_type(struct domain *d,
@@ -201,6 +284,18 @@ static int set_mem_type(struct domain *d,
     if ( data->mem_type >= ARRAY_SIZE(memtype) ||
          unlikely(data->mem_type == HVMMEM_unused) )
         return -EINVAL;
+
+    if ( data->mem_type  == HVMMEM_ioreq_server )
+    {
+        unsigned int flags;
+
+        if ( !hap_enabled(d) )
+            return -EOPNOTSUPP;
+
+        /* Do not change to HVMMEM_ioreq_server if no ioreq server mapped. */
+        if ( !p2m_get_ioreq_server(d, &flags) )
+            return -EINVAL;
+    }
 
     while ( iter < data->nr )
     {
@@ -270,16 +365,14 @@ static int inject_event(struct domain *d,
     return 0;
 }
 
-static int dm_op(domid_t domid,
-                 unsigned int nr_bufs,
-                 xen_dm_op_buf_t bufs[])
+static int dm_op(const struct dmop_args *op_args)
 {
     struct domain *d;
     struct xen_dm_op op;
     bool const_op = true;
     long rc;
 
-    rc = rcu_lock_remote_domain_by_id(domid, &d);
+    rc = rcu_lock_remote_domain_by_id(op_args->domid, &d);
     if ( rc )
         return rc;
 
@@ -290,7 +383,7 @@ static int dm_op(domid_t domid,
     if ( rc )
         goto out;
 
-    if ( !copy_buf_from_guest(bufs, nr_bufs, &op, 0, sizeof(op)) )
+    if ( !COPY_FROM_GUEST_BUF(op, op_args, 0) )
     {
         rc = -EFAULT;
         goto out;
@@ -314,7 +407,7 @@ static int dm_op(domid_t domid,
         if ( data->pad[0] || data->pad[1] || data->pad[2] )
             break;
 
-        rc = hvm_create_ioreq_server(d, curr_d->domain_id, 0,
+        rc = hvm_create_ioreq_server(d, curr_d->domain_id, false,
                                      data->handle_bufioreq, &data->id);
         break;
     }
@@ -331,8 +424,8 @@ static int dm_op(domid_t domid,
             break;
 
         rc = hvm_get_ioreq_server_info(d, data->id,
-                                       &data->ioreq_pfn,
-                                       &data->bufioreq_pfn,
+                                       &data->ioreq_gfn,
+                                       &data->bufioreq_gfn,
                                        &data->bufioreq_port);
         break;
     }
@@ -362,6 +455,56 @@ static int dm_op(domid_t domid,
 
         rc = hvm_unmap_io_range_from_ioreq_server(d, data->id, data->type,
                                                   data->start, data->end);
+        break;
+    }
+
+    case XEN_DMOP_map_mem_type_to_ioreq_server:
+    {
+        struct xen_dm_op_map_mem_type_to_ioreq_server *data =
+            &op.u.map_mem_type_to_ioreq_server;
+        unsigned long first_gfn = data->opaque;
+
+        const_op = false;
+
+        rc = -EOPNOTSUPP;
+        if ( !hap_enabled(d) )
+            break;
+
+        if ( first_gfn == 0 )
+            rc = hvm_map_mem_type_to_ioreq_server(d, data->id,
+                                                  data->type, data->flags);
+        else
+            rc = 0;
+
+        /*
+         * Iterate p2m table when an ioreq server unmaps from p2m_ioreq_server,
+         * and reset the remaining p2m_ioreq_server entries back to p2m_ram_rw.
+         */
+        if ( rc == 0 && data->flags == 0 )
+        {
+            struct p2m_domain *p2m = p2m_get_hostp2m(d);
+
+            while ( read_atomic(&p2m->ioreq.entry_count) &&
+                    first_gfn <= p2m->max_mapped_pfn )
+            {
+                /* Iterate p2m table for 256 gfns each time. */
+                rc = p2m_finish_type_change(d, _gfn(first_gfn), 256);
+                if ( rc < 0 )
+                    break;
+
+                first_gfn += 256;
+
+                /* Check for continuation if it's not the last iteration. */
+                if ( first_gfn <= p2m->max_mapped_pfn &&
+                     hypercall_preempt_check() )
+                {
+                    rc = -ERESTART;
+                    data->opaque = first_gfn;
+                    break;
+                }
+            }
+        }
+
         break;
     }
 
@@ -400,10 +543,10 @@ static int dm_op(domid_t domid,
         if ( data->pad )
             break;
 
-        if ( nr_bufs < 2 )
+        if ( op_args->nr_bufs < 2 )
             break;
 
-        rc = track_dirty_vram(d, data->first_pfn, data->nr, &bufs[1]);
+        rc = track_dirty_vram(d, data->first_pfn, data->nr, &op_args->buf[1]);
         break;
     }
 
@@ -441,13 +584,8 @@ static int dm_op(domid_t domid,
         struct xen_dm_op_modified_memory *data =
             &op.u.modified_memory;
 
-        const_op = false;
-
-        rc = -EINVAL;
-        if ( data->pad )
-            break;
-
-        rc = modified_memory(d, data);
+        rc = modified_memory(d, op_args, data);
+        const_op = !rc;
         break;
     }
 
@@ -478,6 +616,7 @@ static int dm_op(domid_t domid,
         rc = inject_event(d, data);
         break;
     }
+
     case XEN_DMOP_inject_msi:
     {
         const struct xen_dm_op_inject_msi *data =
@@ -491,14 +630,23 @@ static int dm_op(domid_t domid,
         break;
     }
 
+    case XEN_DMOP_remote_shutdown:
+    {
+        const struct xen_dm_op_remote_shutdown *data =
+            &op.u.remote_shutdown;
+
+        domain_shutdown(d, data->reason);
+        rc = 0;
+        break;
+    }
+
     default:
         rc = -EOPNOTSUPP;
         break;
     }
 
     if ( (!rc || rc == -ERESTART) &&
-         !const_op &&
-         !copy_buf_to_guest(bufs, nr_bufs, 0, &op, sizeof(op)) )
+         !const_op && !COPY_TO_GUEST_BUF(op_args, 0, op) )
         rc = -EFAULT;
 
  out:
@@ -520,21 +668,23 @@ CHECK_dm_op_modified_memory;
 CHECK_dm_op_set_mem_type;
 CHECK_dm_op_inject_event;
 CHECK_dm_op_inject_msi;
-
-#define MAX_NR_BUFS 2
+CHECK_dm_op_remote_shutdown;
 
 int compat_dm_op(domid_t domid,
                  unsigned int nr_bufs,
                  XEN_GUEST_HANDLE_PARAM(void) bufs)
 {
-    struct xen_dm_op_buf nat[MAX_NR_BUFS];
+    struct dmop_args args;
     unsigned int i;
     int rc;
 
-    if ( nr_bufs > MAX_NR_BUFS )
+    if ( nr_bufs > ARRAY_SIZE(args.buf) )
         return -E2BIG;
 
-    for ( i = 0; i < nr_bufs; i++ )
+    args.domid = domid;
+    args.nr_bufs = nr_bufs;
+
+    for ( i = 0; i < args.nr_bufs; i++ )
     {
         struct compat_dm_op_buf cmp;
 
@@ -544,12 +694,12 @@ int compat_dm_op(domid_t domid,
 #define XLAT_dm_op_buf_HNDL_h(_d_, _s_) \
         guest_from_compat_handle((_d_)->h, (_s_)->h)
 
-        XLAT_dm_op_buf(&nat[i], &cmp);
+        XLAT_dm_op_buf(&args.buf[i], &cmp);
 
 #undef XLAT_dm_op_buf_HNDL_h
     }
 
-    rc = dm_op(domid, nr_bufs, nat);
+    rc = dm_op(&args);
 
     if ( rc == -ERESTART )
         rc = hypercall_create_continuation(__HYPERVISOR_dm_op, "iih",
@@ -562,16 +712,19 @@ long do_dm_op(domid_t domid,
               unsigned int nr_bufs,
               XEN_GUEST_HANDLE_PARAM(xen_dm_op_buf_t) bufs)
 {
-    struct xen_dm_op_buf nat[MAX_NR_BUFS];
+    struct dmop_args args;
     int rc;
 
-    if ( nr_bufs > MAX_NR_BUFS )
+    if ( nr_bufs > ARRAY_SIZE(args.buf) )
         return -E2BIG;
 
-    if ( copy_from_guest_offset(nat, bufs, 0, nr_bufs) )
+    args.domid = domid;
+    args.nr_bufs = nr_bufs;
+
+    if ( copy_from_guest_offset(&args.buf[0], bufs, 0, args.nr_bufs) )
         return -EFAULT;
 
-    rc = dm_op(domid, nr_bufs, nat);
+    rc = dm_op(&args);
 
     if ( rc == -ERESTART )
         rc = hypercall_create_continuation(__HYPERVISOR_dm_op, "iih",

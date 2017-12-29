@@ -20,7 +20,7 @@ build: $(TARGETS)
 
 .PHONY: clean
 clean:
-	$(RM) *.o $(TARGETS) *~ $(DEPS)
+	$(RM) *.o $(TARGETS) *~ $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
@@ -28,4 +28,4 @@ distclean: clean
 xen-access: xen-access.o Makefile
 	$(CC) -o $@ $< $(LDFLAGS) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxenevtchn)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

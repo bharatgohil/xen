@@ -87,13 +87,21 @@ install: build
 	$(INSTALL_DATA) xenblktapctl.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
 clean:
-	rm -f $(OBJS) $(PICS) $(DEPS) $(IBIN) $(LIB_STATIC) $(LIB_SHARED)
+	rm -f $(OBJS) $(PICS) $(DEPS_RM) $(IBIN) $(LIB_STATIC) $(LIB_SHARED)
 	rm -f $(LIBNAME).so $(LIBSONAME)
 	rm -f *~
 	rm -f xenblktapctl.pc
 
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenblktapctl.pc
+	rm -f $(DESTDIR)$(libdir)/$(LIBSONAME)
+	rm -f $(DESTDIR)$(libdir)/$(LIBNAME).so
+	rm -f $(addprefix $(DESTDIR)$(libdir)/, $(LIB_SHARED))
+	rm -f $(addprefix $(DESTDIR)$(libdir)/, $(LIB_STATIC))
+	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(IBIN))
+
 distclean: clean
 
-.PHONY: all build clean distclean install
+.PHONY: all build clean distclean install uninstall
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

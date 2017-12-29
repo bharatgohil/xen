@@ -215,15 +215,19 @@ void pv_hypercall(struct cpu_user_regs *regs)
     perfc_incr(hypercalls);
 }
 
-void arch_do_multicall_call(struct mc_state *state)
+enum mc_disposition arch_do_multicall_call(struct mc_state *state)
 {
-    if ( !is_pv_32bit_vcpu(current) )
+    struct vcpu *curr = current;
+    unsigned long op;
+
+    if ( !is_pv_32bit_vcpu(curr) )
     {
         struct multicall_entry *call = &state->call;
 
-        if ( (call->op < ARRAY_SIZE(pv_hypercall_table)) &&
-             pv_hypercall_table[call->op].native )
-            call->result = pv_hypercall_table[call->op].native(
+        op = call->op;
+        if ( (op < ARRAY_SIZE(pv_hypercall_table)) &&
+             pv_hypercall_table[op].native )
+            call->result = pv_hypercall_table[op].native(
                 call->args[0], call->args[1], call->args[2],
                 call->args[3], call->args[4], call->args[5]);
         else
@@ -234,15 +238,86 @@ void arch_do_multicall_call(struct mc_state *state)
     {
         struct compat_multicall_entry *call = &state->compat_call;
 
-        if ( (call->op < ARRAY_SIZE(pv_hypercall_table)) &&
-             pv_hypercall_table[call->op].compat )
-            call->result = pv_hypercall_table[call->op].compat(
+        op = call->op;
+        if ( (op < ARRAY_SIZE(pv_hypercall_table)) &&
+             pv_hypercall_table[op].compat )
+            call->result = pv_hypercall_table[op].compat(
                 call->args[0], call->args[1], call->args[2],
                 call->args[3], call->args[4], call->args[5]);
         else
             call->result = -ENOSYS;
     }
 #endif
+
+    return unlikely(op == __HYPERVISOR_iret)
+           ? mc_exit
+           : likely(guest_kernel_mode(curr, guest_cpu_user_regs()))
+             ? mc_continue : mc_preempt;
+}
+
+void hypercall_page_initialise_ring3_kernel(void *hypercall_page)
+{
+    void *p = hypercall_page;
+    unsigned int i;
+
+    /* Fill in all the transfer points with template machine code. */
+    for ( i = 0; i < (PAGE_SIZE / 32); i++, p += 32 )
+    {
+        if ( i == __HYPERVISOR_iret )
+            continue;
+
+        *(u8  *)(p+ 0) = 0x51;    /* push %rcx */
+        *(u16 *)(p+ 1) = 0x5341;  /* push %r11 */
+        *(u8  *)(p+ 3) = 0xb8;    /* mov  $<i>,%eax */
+        *(u32 *)(p+ 4) = i;
+        *(u16 *)(p+ 8) = 0x050f;  /* syscall */
+        *(u16 *)(p+10) = 0x5b41;  /* pop  %r11 */
+        *(u8  *)(p+12) = 0x59;    /* pop  %rcx */
+        *(u8  *)(p+13) = 0xc3;    /* ret */
+    }
+
+    /*
+     * HYPERVISOR_iret is special because it doesn't return and expects a
+     * special stack frame. Guests jump at this transfer point instead of
+     * calling it.
+     */
+    p = hypercall_page + (__HYPERVISOR_iret * 32);
+    *(u8  *)(p+ 0) = 0x51;    /* push %rcx */
+    *(u16 *)(p+ 1) = 0x5341;  /* push %r11 */
+    *(u8  *)(p+ 3) = 0x50;    /* push %rax */
+    *(u8  *)(p+ 4) = 0xb8;    /* mov  $__HYPERVISOR_iret,%eax */
+    *(u32 *)(p+ 5) = __HYPERVISOR_iret;
+    *(u16 *)(p+ 9) = 0x050f;  /* syscall */
+}
+
+void hypercall_page_initialise_ring1_kernel(void *hypercall_page)
+{
+    void *p = hypercall_page;
+    unsigned int i;
+
+    /* Fill in all the transfer points with template machine code. */
+
+    for ( i = 0; i < (PAGE_SIZE / 32); i++, p += 32 )
+    {
+        if ( i == __HYPERVISOR_iret )
+            continue;
+
+        *(u8  *)(p+ 0) = 0xb8;    /* mov  $<i>,%eax */
+        *(u32 *)(p+ 1) = i;
+        *(u16 *)(p+ 5) = (HYPERCALL_VECTOR << 8) | 0xcd; /* int  $xx */
+        *(u8  *)(p+ 7) = 0xc3;    /* ret */
+    }
+
+    /*
+     * HYPERVISOR_iret is special because it doesn't return and expects a
+     * special stack frame. Guests jump at this transfer point instead of
+     * calling it.
+     */
+    p = hypercall_page + (__HYPERVISOR_iret * 32);
+    *(u8  *)(p+ 0) = 0x50;    /* push %eax */
+    *(u8  *)(p+ 1) = 0xb8;    /* mov  $__HYPERVISOR_iret,%eax */
+    *(u32 *)(p+ 2) = __HYPERVISOR_iret;
+    *(u16 *)(p+ 6) = (HYPERCALL_VECTOR << 8) | 0xcd; /* int  $xx */
 }
 
 /*

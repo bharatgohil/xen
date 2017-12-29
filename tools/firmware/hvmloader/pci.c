@@ -59,7 +59,7 @@ static int find_next_rmrr(uint32_t base)
 {
     unsigned int i;
     int next_rmrr = -1;
-    uint64_t end, min_end = 1ULL << 32;
+    uint64_t end, min_end = GB(4);
 
     for ( i = 0; i < memory_map.nr_map ; i++ )
     {
@@ -84,7 +84,6 @@ void pci_setup(void)
     uint32_t vga_devfn = 256;
     uint16_t class, vendor_id, device_id;
     unsigned int bar, pin, link, isa_irq;
-    int next_rmrr;
 
     /* Resources assignable to PCI devices via BARs. */
     struct resource {
@@ -298,7 +297,7 @@ void pci_setup(void)
 
     if ( mmio_hole_size )
     {
-        uint64_t max_ram_below_4g = (1ULL << 32) - mmio_hole_size;
+        uint64_t max_ram_below_4g = GB(4) - mmio_hole_size;
 
         if ( max_ram_below_4g > HVM_BELOW_4G_MMIO_START )
         {
@@ -386,13 +385,13 @@ void pci_setup(void)
     adjust_memory_map();
 
     high_mem_resource.base = ((uint64_t)hvm_info->high_mem_pgend) << PAGE_SHIFT;
-    if ( high_mem_resource.base < 1ull << 32 )
+    if ( high_mem_resource.base < GB(4) )
     {
         if ( hvm_info->high_mem_pgend != 0 )
             printf("WARNING: hvm_info->high_mem_pgend %x"
                    " does not point into high memory!",
                    hvm_info->high_mem_pgend);
-        high_mem_resource.base = 1ull << 32;
+        high_mem_resource.base = GB(4);
     }
     printf("%sRAM in high memory; setting high_mem resource base to "PRIllx"\n",
            hvm_info->high_mem_pgend?"":"No ",
@@ -402,8 +401,6 @@ void pci_setup(void)
     mem_resource.max = pci_mem_end;
     io_resource.base = 0xc000;
     io_resource.max = 0x10000;
-
-    next_rmrr = find_next_rmrr(pci_mem_start);
 
     /* Assign iomem and ioport resources in descending order of size. */
     for ( i = 0; i < nr_bars; i++ )
@@ -462,15 +459,20 @@ void pci_setup(void)
         base = (resource->base  + bar_sz - 1) & ~(uint64_t)(bar_sz - 1);
 
         /* If we're using mem_resource, check for RMRR conflicts. */
-        while ( resource == &mem_resource &&
-                next_rmrr >= 0 &&
-                check_overlap(base, bar_sz,
+        if ( resource == &mem_resource)
+        {
+            int next_rmrr = find_next_rmrr(base);
+
+            while ( next_rmrr >= 0 &&
+                    check_overlap(base, bar_sz,
                               memory_map.map[next_rmrr].addr,
                               memory_map.map[next_rmrr].size) )
-        {
-            base = memory_map.map[next_rmrr].addr + memory_map.map[next_rmrr].size;
-            base = (base + bar_sz - 1) & ~(bar_sz - 1);
-            next_rmrr = find_next_rmrr(base);
+            {
+                base = memory_map.map[next_rmrr].addr +
+                       memory_map.map[next_rmrr].size;
+                base = (base + bar_sz - 1) & ~(bar_sz - 1);
+                next_rmrr = find_next_rmrr(base);
+            }
         }
 
         bar_data |= (uint32_t)base;

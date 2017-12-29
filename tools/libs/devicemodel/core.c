@@ -21,6 +21,16 @@
 
 #include "private.h"
 
+static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
+    xendevicemodel_handle *dmod = CONTAINER_OF(ah, *dmod, tc_ah);
+
+    if (dmod->fd < 0)
+        /* just in case */
+        return 0;
+
+    return xendevicemodel_restrict(dmod, domid);
+}
+
 xendevicemodel_handle *xendevicemodel_open(xentoollog_logger *logger,
                                            unsigned open_flags)
 {
@@ -29,6 +39,10 @@ xendevicemodel_handle *xendevicemodel_open(xentoollog_logger *logger,
 
     if (!dmod)
         return NULL;
+
+    dmod->fd = -1;
+    dmod->tc_ah.restrict_callback = all_restrict_cb;
+    xentoolcore__register_active_handle(&dmod->tc_ah);
 
     dmod->flags = open_flags;
     dmod->logger = logger;
@@ -54,6 +68,7 @@ xendevicemodel_handle *xendevicemodel_open(xentoollog_logger *logger,
 
 err:
     xtl_logger_destroy(dmod->logger_tofree);
+    xentoolcore__deregister_active_handle(&dmod->tc_ah);
     xencall_close(dmod->xcall);
     free(dmod);
     return NULL;
@@ -68,6 +83,7 @@ int xendevicemodel_close(xendevicemodel_handle *dmod)
 
     rc = osdep_xendevicemodel_close(dmod);
 
+    xentoolcore__deregister_active_handle(&dmod->tc_ah);
     xencall_close(dmod->xcall);
     xtl_logger_destroy(dmod->logger_tofree);
     free(dmod);
@@ -174,7 +190,7 @@ int xendevicemodel_create_ioreq_server(
 
 int xendevicemodel_get_ioreq_server_info(
     xendevicemodel_handle *dmod, domid_t domid, ioservid_t id,
-    xen_pfn_t *ioreq_pfn, xen_pfn_t *bufioreq_pfn,
+    xen_pfn_t *ioreq_gfn, xen_pfn_t *bufioreq_gfn,
     evtchn_port_t *bufioreq_port)
 {
     struct xen_dm_op op;
@@ -192,11 +208,11 @@ int xendevicemodel_get_ioreq_server_info(
     if (rc)
         return rc;
 
-    if (ioreq_pfn)
-        *ioreq_pfn = data->ioreq_pfn;
+    if (ioreq_gfn)
+        *ioreq_gfn = data->ioreq_gfn;
 
-    if (bufioreq_pfn)
-        *bufioreq_pfn = data->bufioreq_pfn;
+    if (bufioreq_gfn)
+        *bufioreq_gfn = data->bufioreq_gfn;
 
     if (bufioreq_port)
         *bufioreq_port = data->bufioreq_port;
@@ -240,6 +256,31 @@ int xendevicemodel_unmap_io_range_from_ioreq_server(
     data->type = is_mmio ? XEN_DMOP_IO_RANGE_MEMORY : XEN_DMOP_IO_RANGE_PORT;
     data->start = start;
     data->end = end;
+
+    return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
+}
+
+int xendevicemodel_map_mem_type_to_ioreq_server(
+    xendevicemodel_handle *dmod, domid_t domid, ioservid_t id, uint16_t type,
+    uint32_t flags)
+{
+    struct xen_dm_op op;
+    struct xen_dm_op_map_mem_type_to_ioreq_server *data;
+
+    if (type != HVMMEM_ioreq_server ||
+        flags & ~XEN_DMOP_IOREQ_MEM_ACCESS_WRITE) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(&op, 0, sizeof(op));
+
+    op.op = XEN_DMOP_map_mem_type_to_ioreq_server;
+    data = &op.u.map_mem_type_to_ioreq_server;
+
+    data->id = id;
+    data->type = type;
+    data->flags = flags;
 
     return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
 }
@@ -434,22 +475,36 @@ int xendevicemodel_track_dirty_vram(
                              dirty_bitmap, (size_t)(nr + 7) / 8);
 }
 
-int xendevicemodel_modified_memory(
-    xendevicemodel_handle *dmod, domid_t domid, uint64_t first_pfn,
-    uint32_t nr)
+int xendevicemodel_modified_memory_bulk(
+    xendevicemodel_handle *dmod, domid_t domid,
+    struct xen_dm_op_modified_memory_extent *extents, uint32_t nr)
 {
     struct xen_dm_op op;
-    struct xen_dm_op_modified_memory *data;
+    struct xen_dm_op_modified_memory *header;
+    size_t extents_size = nr * sizeof(struct xen_dm_op_modified_memory_extent);
 
     memset(&op, 0, sizeof(op));
 
     op.op = XEN_DMOP_modified_memory;
-    data = &op.u.modified_memory;
+    header = &op.u.modified_memory;
 
-    data->first_pfn = first_pfn;
-    data->nr = nr;
+    header->nr_extents = nr;
+    header->opaque = 0;
 
-    return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
+    return xendevicemodel_op(dmod, domid, 2, &op, sizeof(op),
+                             extents, extents_size);
+}
+
+int xendevicemodel_modified_memory(
+    xendevicemodel_handle *dmod, domid_t domid, uint64_t first_pfn,
+    uint32_t nr)
+{
+    struct xen_dm_op_modified_memory_extent extent = {
+        .first_pfn = first_pfn,
+        .nr = nr,
+    };
+
+    return xendevicemodel_modified_memory_bulk(dmod, domid, &extent, 1);
 }
 
 int xendevicemodel_set_mem_type(
@@ -489,6 +544,22 @@ int xendevicemodel_inject_event(
     data->error_code = error_code;
     data->insn_len = insn_len;
     data->cr2 = cr2;
+
+    return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
+}
+
+int xendevicemodel_shutdown(
+    xendevicemodel_handle *dmod, domid_t domid, unsigned int reason)
+{
+    struct xen_dm_op op;
+    struct xen_dm_op_remote_shutdown *data;
+
+    memset(&op, 0, sizeof(op));
+
+    op.op = XEN_DMOP_remote_shutdown;
+    data = &op.u.remote_shutdown;
+
+    data->reason = reason;
 
     return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
 }

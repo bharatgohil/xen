@@ -98,7 +98,7 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
     l2_pgentry_t l2e, *l2t;
     l1_pgentry_t l1e, *l1t;
     unsigned long cr3 = (pgd3val ? pgd3val : dp->vcpu[0]->arch.cr3);
-    mfn_t mfn = _mfn(cr3 >> PAGE_SHIFT);
+    mfn_t mfn = maddr_to_mfn(cr3);
 
     DBGP2("vaddr:%lx domid:%d cr3:%lx pgd3:%lx\n", vaddr, dp->domain_id, 
           cr3, pgd3val);
@@ -108,7 +108,7 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
         l4t = map_domain_page(mfn);
         l4e = l4t[l4_table_offset(vaddr)];
         unmap_domain_page(l4t);
-        mfn = _mfn(l4e_get_pfn(l4e));
+        mfn = l4e_get_mfn(l4e);
         DBGP2("l4t:%p l4to:%lx l4e:%lx mfn:%#"PRI_mfn"\n", l4t,
               l4_table_offset(vaddr), l4e, mfn_x(mfn));
         if ( !(l4e_get_flags(l4e) & _PAGE_PRESENT) )
@@ -120,7 +120,7 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
         l3t = map_domain_page(mfn);
         l3e = l3t[l3_table_offset(vaddr)];
         unmap_domain_page(l3t);
-        mfn = _mfn(l3e_get_pfn(l3e));
+        mfn = l3e_get_mfn(l3e);
         DBGP2("l3t:%p l3to:%lx l3e:%lx mfn:%#"PRI_mfn"\n", l3t,
               l3_table_offset(vaddr), l3e, mfn_x(mfn));
         if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) ||
@@ -134,7 +134,7 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
     l2t = map_domain_page(mfn);
     l2e = l2t[l2_table_offset(vaddr)];
     unmap_domain_page(l2t);
-    mfn = _mfn(l2e_get_pfn(l2e));
+    mfn = l2e_get_mfn(l2e);
     DBGP2("l2t:%p l2to:%lx l2e:%lx mfn:%#"PRI_mfn"\n",
           l2t, l2_table_offset(vaddr), l2e, mfn_x(mfn));
     if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) ||
@@ -146,7 +146,7 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
     l1t = map_domain_page(mfn);
     l1e = l1t[l1_table_offset(vaddr)];
     unmap_domain_page(l1t);
-    mfn = _mfn(l1e_get_pfn(l1e));
+    mfn = l1e_get_mfn(l1e);
     DBGP2("l1t:%p l1to:%lx l1e:%lx mfn:%#"PRI_mfn"\n", l1t, l1_table_offset(vaddr),
           l1e, mfn_x(mfn));
 
@@ -154,9 +154,9 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
 }
 
 /* Returns: number of bytes remaining to be copied */
-unsigned int dbg_rw_guest_mem(struct domain *dp, void * __user gaddr,
-                              void * __user buf, unsigned int len,
-                              bool_t toaddr, uint64_t pgd3)
+static unsigned int dbg_rw_guest_mem(struct domain *dp, void * __user gaddr,
+                                     void * __user buf, unsigned int len,
+                                     bool toaddr, uint64_t pgd3)
 {
     while ( len > 0 )
     {
@@ -207,7 +207,7 @@ unsigned int dbg_rw_guest_mem(struct domain *dp, void * __user gaddr,
  * Returns: number of bytes remaining to be copied. 
  */
 unsigned int dbg_rw_mem(void * __user addr, void * __user buf,
-                        unsigned int len, domid_t domid, bool_t toaddr,
+                        unsigned int len, domid_t domid, bool toaddr,
                         uint64_t pgd3)
 {
     DBGP2("gmem:addr:%lx buf:%p len:$%u domid:%d toaddr:%x\n",

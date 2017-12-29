@@ -32,6 +32,8 @@ static int physdev_hvm_map_pirq(
 {
     int ret = 0;
 
+    ASSERT(!is_hardware_domain(d));
+
     spin_lock(&d->event_lock);
     switch ( type )
     {
@@ -39,7 +41,7 @@ static int physdev_hvm_map_pirq(
         const struct hvm_irq_dpci *hvm_irq_dpci;
         unsigned int machine_gsi = 0;
 
-        if ( *index < 0 || *index >= NR_HVM_IRQS )
+        if ( *index < 0 || *index >= NR_HVM_DOMU_IRQS )
         {
             ret = -EINVAL;
             break;
@@ -52,7 +54,7 @@ static int physdev_hvm_map_pirq(
         {
             const struct hvm_girq_dpci_mapping *girq;
 
-            BUILD_BUG_ON(ARRAY_SIZE(hvm_irq_dpci->girq) < NR_HVM_IRQS);
+            BUILD_BUG_ON(ARRAY_SIZE(hvm_irq_dpci->girq) < NR_HVM_DOMU_IRQS);
             list_for_each_entry ( girq,
                                   &hvm_irq_dpci->girq[*index],
                                   list )
@@ -90,8 +92,7 @@ int physdev_map_pirq(domid_t domid, int type, int *index, int *pirq_p,
                      struct msi_info *msi)
 {
     struct domain *d = current->domain;
-    int pirq, irq, ret = 0;
-    void *map_data = NULL;
+    int ret;
 
     if ( domid == DOMID_SELF && is_hvm_domain(d) && has_pirq(d) )
     {
@@ -109,7 +110,7 @@ int physdev_map_pirq(domid_t domid, int type, int *index, int *pirq_p,
     if ( d == NULL )
         return -ESRCH;
 
-    ret = xsm_map_domain_pirq(XSM_TARGET, d);
+    ret = xsm_map_domain_pirq(XSM_DM_PRIV, d);
     if ( ret )
         goto free_domain;
 
@@ -117,135 +118,24 @@ int physdev_map_pirq(domid_t domid, int type, int *index, int *pirq_p,
     switch ( type )
     {
     case MAP_PIRQ_TYPE_GSI:
-        if ( *index < 0 || *index >= nr_irqs_gsi )
-        {
-            dprintk(XENLOG_G_ERR, "dom%d: map invalid irq %d\n",
-                    d->domain_id, *index);
-            ret = -EINVAL;
-            goto free_domain;
-        }
-
-        irq = domain_pirq_to_irq(current->domain, *index);
-        if ( irq <= 0 )
-        {
-            if ( is_hardware_domain(current->domain) )
-                irq = *index;
-            else {
-                dprintk(XENLOG_G_ERR, "dom%d: map pirq with incorrect irq!\n",
-                        d->domain_id);
-                ret = -EINVAL;
-                goto free_domain;
-            }
-        }
+        ret = allocate_and_map_gsi_pirq(d, *index, pirq_p);
         break;
 
     case MAP_PIRQ_TYPE_MSI:
         if ( !msi->table_base )
             msi->entry_nr = 1;
-        irq = *index;
-        if ( irq == -1 )
+        /* fallthrough */
     case MAP_PIRQ_TYPE_MULTI_MSI:
-            irq = create_irq(NUMA_NO_NODE);
-
-        if ( irq < nr_irqs_gsi || irq >= nr_irqs )
-        {
-            dprintk(XENLOG_G_ERR, "dom%d: can't create irq for msi!\n",
-                    d->domain_id);
-            ret = -EINVAL;
-            goto free_domain;
-        }
-
-        msi->irq = irq;
-        map_data = msi;
+        ret = allocate_and_map_msi_pirq(d, *index, pirq_p, type, msi);
         break;
 
     default:
         dprintk(XENLOG_G_ERR, "dom%d: wrong map_pirq type %x\n",
                 d->domain_id, type);
         ret = -EINVAL;
-        goto free_domain;
+        break;
     }
 
-    pcidevs_lock();
-    /* Verify or get pirq. */
-    spin_lock(&d->event_lock);
-    pirq = domain_irq_to_pirq(d, irq);
-    if ( *pirq_p < 0 )
-    {
-        if ( pirq )
-        {
-            dprintk(XENLOG_G_ERR, "dom%d: %d:%d already mapped to %d\n",
-                    d->domain_id, *index, *pirq_p, pirq);
-            if ( pirq < 0 )
-            {
-                ret = -EBUSY;
-                goto done;
-            }
-        }
-        else if ( type == MAP_PIRQ_TYPE_MULTI_MSI )
-        {
-            if ( msi->entry_nr <= 0 || msi->entry_nr > 32 )
-                ret = -EDOM;
-            else if ( msi->entry_nr != 1 && !iommu_intremap )
-                ret = -EOPNOTSUPP;
-            else
-            {
-                while ( msi->entry_nr & (msi->entry_nr - 1) )
-                    msi->entry_nr += msi->entry_nr & -msi->entry_nr;
-                pirq = get_free_pirqs(d, msi->entry_nr);
-                if ( pirq < 0 )
-                {
-                    while ( (msi->entry_nr >>= 1) > 1 )
-                        if ( get_free_pirqs(d, msi->entry_nr) > 0 )
-                            break;
-                    dprintk(XENLOG_G_ERR, "dom%d: no block of %d free pirqs\n",
-                            d->domain_id, msi->entry_nr << 1);
-                    ret = pirq;
-                }
-            }
-            if ( ret < 0 )
-                goto done;
-        }
-        else
-        {
-            pirq = get_free_pirq(d, type);
-            if ( pirq < 0 )
-            {
-                dprintk(XENLOG_G_ERR, "dom%d: no free pirq\n", d->domain_id);
-                ret = pirq;
-                goto done;
-            }
-        }
-    }
-    else
-    {
-        if ( pirq && pirq != *pirq_p )
-        {
-            dprintk(XENLOG_G_ERR, "dom%d: pirq %d conflicts with irq %d\n",
-                    d->domain_id, *index, *pirq_p);
-            ret = -EEXIST;
-            goto done;
-        }
-        else
-            pirq = *pirq_p;
-    }
-
-    ret = map_domain_pirq(d, pirq, irq, type, map_data);
-    if ( ret == 0 )
-        *pirq_p = pirq;
-
- done:
-    spin_unlock(&d->event_lock);
-    pcidevs_unlock();
-    if ( ret != 0 )
-        switch ( type )
-        {
-        case MAP_PIRQ_TYPE_MSI:
-            if ( *index == -1 )
-        case MAP_PIRQ_TYPE_MULTI_MSI:
-                destroy_irq(irq);
-            break;
-        }
  free_domain:
     rcu_unlock_domain(d);
     return ret;
@@ -254,13 +144,14 @@ int physdev_map_pirq(domid_t domid, int type, int *index, int *pirq_p,
 int physdev_unmap_pirq(domid_t domid, int pirq)
 {
     struct domain *d;
-    int ret;
+    int ret = 0;
 
     d = rcu_lock_domain_by_any_id(domid);
     if ( d == NULL )
         return -ESRCH;
 
-    ret = xsm_unmap_domain_pirq(XSM_TARGET, d);
+    if ( domid != DOMID_SELF || !is_hvm_domain(d) || !has_pirq(d) )
+        ret = xsm_unmap_domain_pirq(XSM_DM_PRIV, d);
     if ( ret )
         goto free_domain;
 
@@ -317,7 +208,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( is_hvm_domain(currd) &&
              domain_pirq_to_emuirq(currd, eoi.irq) > 0 )
         {
-            struct hvm_irq *hvm_irq = &currd->arch.hvm_domain.irq;
+            struct hvm_irq *hvm_irq = hvm_domain_irq(currd);
             int gsi = domain_pirq_to_emuirq(currd, eoi.irq);
 
             /* if this is a level irq and count > 0, send another

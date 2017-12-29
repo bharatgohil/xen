@@ -2,12 +2,12 @@ XEN_ROOT = $(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 MAJOR    = 1
-MINOR    = 0
+MINOR    = 2
 SHLIB_LDFLAGS += -Wl,--version-script=libxenforeignmemory.map
 
 CFLAGS   += -Werror -Wmissing-prototypes
 CFLAGS   += -I./include $(CFLAGS_xeninclude)
-CFLAGS   += $(CFLAGS_libxentoollog)
+CFLAGS   += $(CFLAGS_libxentoollog) $(CFLAGS_libxentoolcore)
 
 SRCS-y                 += core.c
 SRCS-$(CONFIG_Linux)   += linux.c
@@ -62,7 +62,7 @@ libxenforeignmemory.so.$(MAJOR): libxenforeignmemory.so.$(MAJOR).$(MINOR)
 	$(SYMLINK_SHLIB) $< $@
 
 libxenforeignmemory.so.$(MAJOR).$(MINOR): $(PIC_OBJS) libxenforeignmemory.map
-	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenforeignmemory.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenforeignmemory.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxentoolcore) $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: build
@@ -75,13 +75,22 @@ install: build
 	$(INSTALL_DATA) include/xenforeignmemory.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xenforeignmemory.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenforeignmemory.pc
+	rm -f $(DESTDIR)$(includedir)/xenforeignmemory.h
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.so
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxenforeignmemory.so.$(MAJOR).$(MINOR) libxenforeignmemory.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xenforeignmemory.pc

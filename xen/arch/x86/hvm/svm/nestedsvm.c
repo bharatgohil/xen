@@ -357,7 +357,7 @@ static int nsvm_vmrun_permissionmap(struct vcpu *v, bool_t viopm)
     struct vmcb_struct *host_vmcb = arch_svm->vmcb;
     unsigned long *ns_msrpm_ptr;
     unsigned int i;
-    enum hvm_copy_result ret;
+    enum hvm_translation_result ret;
     unsigned long *ns_viomap;
     bool_t ioport_80 = 1, ioport_ed = 1;
 
@@ -365,7 +365,8 @@ static int nsvm_vmrun_permissionmap(struct vcpu *v, bool_t viopm)
 
     ret = hvm_copy_from_guest_phys(svm->ns_cached_msrpm,
                                    ns_vmcb->_msrpm_base_pa, MSRPM_SIZE);
-    if (ret != HVMCOPY_okay) {
+    if ( ret != HVMTRANS_okay )
+    {
         gdprintk(XENLOG_ERR, "hvm_copy_from_guest_phys msrpm %u\n", ret);
         return 1;
     }
@@ -411,7 +412,11 @@ static void nestedsvm_vmcb_set_nestedp2m(struct vcpu *v,
     ASSERT(v != NULL);
     ASSERT(vvmcb != NULL);
     ASSERT(n2vmcb != NULL);
-    p2m = p2m_get_nestedp2m(v, vvmcb->_h_cr3);
+
+    /* This will allow nsvm_vcpu_hostcr3() to return correct np2m_base */
+    vcpu_nestedsvm(v).ns_vmcb_hostcr3 = vvmcb->_h_cr3;
+
+    p2m = p2m_get_nestedp2m(v);
     n2vmcb->_h_cr3 = pagetable_get_paddr(p2m_get_pagetable(p2m));
 }
 
@@ -658,13 +663,13 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* Cleanbits */
     n2vmcb->cleanbits.bytes = 0;
 
-    rc = svm_vmcb_isvalid(__func__, ns_vmcb, 1);
+    rc = svm_vmcb_isvalid(__func__, ns_vmcb, v, true);
     if (rc) {
         gdprintk(XENLOG_ERR, "virtual vmcb invalid\n");
         return NSVM_ERROR_VVMCB;
     }
 
-    rc = svm_vmcb_isvalid(__func__, n2vmcb, 1);
+    rc = svm_vmcb_isvalid(__func__, n2vmcb, v, true);
     if (rc) {
         gdprintk(XENLOG_ERR, "n2vmcb invalid\n");
         return NSVM_ERROR_VMENTRY;
@@ -1406,6 +1411,8 @@ nestedsvm_check_intercepts(struct vcpu *v, struct cpu_user_regs *regs,
         /* Always let the guest handle VMMCALL/VMCALL */
         return NESTEDHVM_VMEXIT_INJECT;
     default:
+        gprintk(XENLOG_ERR, "Unexpected nested vmexit: reason %#"PRIx64"\n",
+                exitcode);
         break;
     }
 

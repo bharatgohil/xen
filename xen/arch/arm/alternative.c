@@ -24,12 +24,17 @@
 #include <xen/vmap.h>
 #include <xen/smp.h>
 #include <xen/stop_machine.h>
+#include <xen/virtual_region.h>
 #include <asm/alternative.h>
 #include <asm/atomic.h>
 #include <asm/byteorder.h>
 #include <asm/cpufeature.h>
 #include <asm/insn.h>
 #include <asm/page.h>
+
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef virt_to_mfn
+#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 extern const struct alt_instr __alt_instructions[], __alt_instructions_end[];
 
@@ -41,17 +46,17 @@ struct alt_region {
 /*
  * Check if the target PC is within an alternative block.
  */
-static bool_t branch_insn_requires_update(const struct alt_instr *alt,
-                                          unsigned long pc)
+static bool branch_insn_requires_update(const struct alt_instr *alt,
+                                        unsigned long pc)
 {
     unsigned long replptr;
 
     if ( is_active_kernel_text(pc) )
-        return 1;
+        return true;
 
     replptr = (unsigned long)ALT_REPL_PTR(alt);
     if ( pc >= replptr && pc <= (replptr + alt->alt_len) )
-        return 0;
+        return false;
 
     /*
      * Branching into *another* alternate sequence is doomed, and
@@ -153,9 +158,13 @@ static int __apply_alternatives_multi_stop(void *unused)
     {
         int ret;
         struct alt_region region;
-        mfn_t xen_mfn = _mfn(virt_to_mfn(_start));
-        unsigned int xen_order = get_order_from_bytes(_end - _start);
+        mfn_t xen_mfn = virt_to_mfn(_start);
+        paddr_t xen_size = _end - _start;
+        unsigned int xen_order = get_order_from_bytes(xen_size);
         void *xenmap;
+        struct virtual_region patch_region = {
+            .list = LIST_HEAD_INIT(patch_region.list),
+        };
 
         BUG_ON(patched);
 
@@ -167,6 +176,15 @@ static int __apply_alternatives_multi_stop(void *unused)
                         VMAP_DEFAULT);
         /* Re-mapping Xen is not expected to fail during boot. */
         BUG_ON(!xenmap);
+
+        /*
+         * If we generate a new branch instruction, the target will be
+         * calculated in this re-mapped Xen region. So we have to register
+         * this re-mapped Xen region as a virtual region temporarily.
+         */
+        patch_region.start = xenmap;
+        patch_region.end = xenmap + xen_size;
+        register_virtual_region(&patch_region);
 
         /*
          * Find the virtual address of the alternative region in the new
@@ -181,6 +199,8 @@ static int __apply_alternatives_multi_stop(void *unused)
         ret = __apply_alternatives(&region);
         /* The patching is not expected to fail during boot. */
         BUG_ON(ret != 0);
+
+        unregister_virtual_region(&patch_region);
 
         vunmap(xenmap);
 

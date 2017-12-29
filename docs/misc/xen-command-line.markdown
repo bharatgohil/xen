@@ -133,13 +133,6 @@ resume.
 `s3_mode` instructs Xen to set up the boot time (option `vga=`) video
 mode during S3 resume.
 
-### allowsuperpage
-> `= <boolean>`
-
-> Default: `true`
-
-Permit Xen to use superpages when performing memory management.
-
 ### altp2m (Intel)
 > `= <boolean>`
 
@@ -324,6 +317,46 @@ Both option `com1` and `com2` follow the same format.
 
 A typical setup for most situations might be `com1=115200,8n1`
 
+In addition to the above positional specification for UART parameters,
+name=value pair specfications are also supported. This is used to add
+flexibility for UART devices which require additional UART parameter
+configurations.
+
+The comma separation still delineates positional parameters. Hence,
+unless the parameter is explicitly specified with name=value option, it
+will be considered a positional parameter.
+
+The syntax consists of
+com1=(comma-separated positional parameters),(comma separated name-value pairs)
+
+The accepted name keywords for name=value pairs are:
+
+* `baud` - accepts integer baud rate (eg. 115200) or `auto`
+* `bridge`- Similar to bridge-bdf in positional parameters.
+            Used to determine the PCI bridge to access the UART device.
+            Notation is xx:xx.x `<bus>:<device>.<function>`
+* `clock-hz`- accepts large integers to setup UART clock frequencies.
+              Do note - these values are multiplied by 16.
+* `data-bits` - integer between 5 and 8
+* `dev` - accepted values are `pci` OR `amt`. If this option
+          is used to specify if the serial device is pci-based. The io_base
+          cannot be specified when `dev=pci` or `dev=amt` is used.
+* `io-base` - accepts integer which specified IO base port for UART registers
+* `irq` - IRQ number to use
+* `parity` - accepted values are same as positional parameters
+* `port` - Used to specify which port the PCI serial device is located on
+           Notation is xx:xx.x `<bus>:<device>.<function>`
+* `reg-shift` - register shifts required to set UART registers
+* `reg-width` - register width required to set UART registers
+                (only accepts 1 and 4)
+* `stop-bits` - only accepts 1 or 2 for the number of stop bits
+
+The following are examples of correct specifications:
+
+    com1=115200,8n1,0x3f8,4
+    com1=115200,8n1,0x3f8,4,reg_width=4,reg_shift=2
+    com1=baud=115200,parity=n,stop_bits=1,io_base=0x3f8,reg_width=4
+
 ### conring\_size
 > `= <size>`
 
@@ -358,6 +391,8 @@ makes sense on its own.
 
 > Default: `none`
 
+> Can be modified at runtime
+
 Specify which timestamp format Xen should use for each console line.
 
 * `none`: No timestamps
@@ -383,6 +418,8 @@ into the console ring buffer.
 > `= <switch char>[x]`
 
 > Default: `conswitch=a`
+
+> Can be modified at runtime
 
 Specify which character should be used to switch serial input between
 Xen and dom0.  The required sequence is CTRL-&lt;switch char&gt; three
@@ -474,6 +511,7 @@ combination with the `low_crashinfo` command line option.
 ### crashkernel
 > `= <ramsize-range>:<size>[,...][{@,<}<offset>]`
 > `= <size>[{@,<}<offset>]`
+> `= <size>,below=offset`
 
 Specify sizes and optionally placement of the crash kernel reservation
 area.  The `<ramsize-range>:<size>` pairs indicate how much memory to
@@ -484,6 +522,10 @@ RAM (`<ramsize-range>`).  Each `<ramsize-range>` is of the form
 A trailing `@<offset>` specifies the exact address this area should be
 placed at, whereas `<` in place of `@` just specifies an upper bound of
 the address range the area should fall into.
+
+< and below are synonyomous, the latter being useful for grub2 systems
+which would otherwise require escaping of the < option
+
 
 ### credit2\_balance\_over
 > `= <integer>`
@@ -525,7 +567,7 @@ also slow in responding to load changes.
 The default value of `1 sec` is rather long.
 
 ### credit2\_runqueue
-> `= core | socket | node | all`
+> `= cpu | core | socket | node | all`
 
 > Default: `socket`
 
@@ -536,6 +578,7 @@ balancing (for instance, it will deal better with hyperthreading),
 but also more overhead.
 
 Available alternatives, with their meaning, are:
+* `cpu`: one runqueue per each logical pCPUs of the host;
 * `core`: one runqueue per each physical core of the host;
 * `socket`: one runqueue per each physical socket (which often,
             but not always, matches a NUMA node) of the host;
@@ -652,11 +695,6 @@ restrictions set up here. Note that the values to be specified here are
 ACPI PXM ones, not Xen internal node numbers. `relaxed` sets up vCPU
 affinities to prefer but be not limited to the specified node(s).
 
-### dom0\_shadow
-> `= <boolean>`
-
-This option is deprecated, please use `dom0=shadow` instead.
-
 ### dom0\_vcpus\_pin
 > `= <boolean>`
 
@@ -679,7 +717,8 @@ Flag that makes a dom0 boot in PVHv2 mode.
 
 > Default: `false`
 
-Flag that makes a dom0 use shadow paging.
+Flag that makes a dom0 use shadow paging. Only works when "pvh" is
+enabled.
 
 ### dtuart (ARM)
 > `= path [:options]`
@@ -836,32 +875,35 @@ Specify which console gdbstub should use. See **console**.
 ### gnttab\_max\_frames
 > `= <integer>`
 
-> Default: `32`
+> Default: `64`
+
+> Can be modified at runtime
 
 Specify the maximum number of frames which any domain may use as part
-of its grant table.
+of its grant table. This value is an upper boundary of the per-domain
+value settable via Xen tools.
+
+Dom0 is using this value for sizing its grant table.
 
 ### gnttab\_max\_maptrack\_frames
 > `= <integer>`
 
-> Default: `8 * gnttab_max_frames`
+> Default: `1024`
+
+> Can be modified at runtime
 
 Specify the maximum number of frames to use as part of a domains
-maptrack array.
+maptrack array. This value is an upper boundary of the per-domain
+value settable via Xen tools.
 
-### gnttab\_max\_nr\_frames
-> `= <integer>`
-
-*Deprecated*
-Use **gnttab\_max\_frames** and **gnttab\_max\_maptrack\_frames** instead.
-
-Specify the maximum number of frames per grant table operation and the
-maximum number of maptrack frames domain.
+Dom0 is using this value for sizing its maptrack table.
 
 ### guest\_loglvl
 > `= <level>[/<rate-limited level>]` where level is `none | error | warning | info | debug | all`
 
 > Default: `guest_loglvl=none/warning`
+
+> Can be modified at runtime
 
 Set the logging level for Xen guests.  Any log message with equal more
 more importance will be printed.
@@ -1087,11 +1129,12 @@ wait descriptor timed out', try increasing this value.
 ### iommu\_inclusive\_mapping (VT-d)
 > `= <boolean>`
 
-> Default: `false`
+> Default: `true`
 
-Use this to work around firmware issues providing correct RMRR entries. Rather
-than only mapping RAM pages for IOMMU accesses for Dom0, with this option all
-pages not marked as unusable in the E820 table will get a mapping established.
+Use this to work around firmware issues providing incorrect RMRR entries.
+Rather than only mapping RAM pages for IOMMU accesses for Dom0, with this
+option all pages not marked as unusable in the E820 table will get a mapping
+established.
 
 ### irq\_ratelimit
 > `= <integer>`
@@ -1127,6 +1170,8 @@ if left disabled by the BIOS.
 > `= <level>[/<rate-limited level>]` where level is `none | error | warning | info | debug | all`
 
 > Default: `loglvl=warning`
+
+> Can be modified at runtime
 
 Set the logging level for Xen.  Any log message with equal more more
 importance will be printed.
@@ -1175,6 +1220,15 @@ based interrupts. Any higher IRQs will be available for use via PCI MSI.
 
 ### maxcpus
 > `= <integer>`
+
+### max\_lpi\_bits
+> `= <integer>`
+
+Specifies the number of ARM GICv3 LPI interrupts to allocate on the host,
+presented as the number of bits needed to encode it. This must be at least
+14 and not exceed 32, and each LPI requires one byte (configuration) and
+one pending bit to be allocated.
+Defaults to 20 bits (to cover at most 1048576 interrupts).
 
 ### mce
 > `= <integer>`
@@ -1368,6 +1422,35 @@ The following resources are available:
     CDP, one COS will corespond two CBMs other than one with CAT, due to the
     sum of CBMs is fixed, that means actual `cos_max` in use will automatically
     reduce to half when CDP is enabled.
+	
+### pv-linear-pt
+> `= <boolean>`
+
+> Default: `true`
+
+Only available if Xen is compiled with CONFIG\_PV\_LINEAR\_PT support
+enabled.
+
+Allow PV guests to have pagetable entries pointing to other pagetables
+of the same level (i.e., allowing L2 PTEs to point to other L2 pages).
+This technique is often called "linear pagetables", and is sometimes
+used to allow operating systems a simple way to consistently map the
+current process's pagetables into its own virtual address space.
+
+Linux and MiniOS don't use this technique.  NetBSD and Novell Netware
+do; there may be other custom operating systems which do.  If you're
+certain you don't plan on having PV guests which use this feature,
+turning it off can reduce the attack surface.
+
+### rcu-idle-timer-period-ms
+> `= <integer>`
+
+> Default: `10`
+
+How frequently a CPU which has gone idle, but with pending RCU callbacks,
+should be woken up to check if the grace period has completed, and the
+callbacks are safe to be executed. Expressed in milliseconds; maximum is
+100, and it can't be 0.
 
 ### reboot
 > `= t[riple] | k[bd] | a[cpi] | p[ci] | P[ower] | e[fi] | n[o] [, [w]arm | [c]old]`
@@ -1427,7 +1510,7 @@ Map the HPET page as read only in Dom0. If disabled the page will be mapped
 with read and write permissions.
 
 ### sched
-> `= credit | credit2 | arinc653`
+> `= credit | credit2 | arinc653 | rtds | null`
 
 > Default: `sched=credit`
 
@@ -1473,6 +1556,50 @@ enabling more sockets and cores to go into deeper sleep states.
 > Default: `16kB`
 
 Set the serial transmit buffer size.
+
+### serrors (ARM)
+> `= diverse | forward | panic`
+
+> Default: `diverse`
+
+This parameter is provided to administrators to determine how the
+hypervisors handle SErrors.
+
+In order to distinguish guest-generated SErrors from hypervisor-generated
+SErrors we have to place SError checking code in every EL1 <-> EL2 paths.
+That will cause overhead on entries and exits due to dsb/isb. However, not all
+platforms need to categorize SErrors. For example, a host that is running with
+trusted guests. The administrator can confirm that all guests that are running
+on the host will not trigger such SErrors. In this case, the administrator can
+use this parameter to skip categorizing SErrors and reduce the overhead of
+dsb/isb.
+
+We provided the following 3 options to administrators to determine how the
+hypervisors handle SErrors:
+
+* `diverse`:
+  The hypervisor will distinguish guest SErrors from hypervisor SErrors.
+  The guest generated SErrors will be forwarded to guests, the hypervisor
+  generated SErrors will cause the whole system to crash.
+  It requires:
+  1. dsb/isb on all EL1 -> EL2 trap entries to categorize SErrors correctly.
+  2. dsb/isb on EL2 -> EL1 return paths to prevent slipping hypervisor
+     SErrors to guests.
+  3. dsb/isb in context switch to isolate SErrors between 2 vCPUs.
+
+* `forward`:
+  The hypervisor will not distinguish guest SErrors from hypervisor SErrors.
+  All SErrors will be forwarded to guests, except the SErrors generated when
+  the idle vCPU is running. The idle domain doesn't have the ability to handle
+  SErrors, so we have to crash the whole system when we get SErros with the
+  idle vCPU. This option will avoid most overhead of the dsb/isb, except the
+  dsb/isb in context switch which is used to isolate the SErrors between 2
+  vCPUs.
+
+* `panic`:
+  The hypervisor will not distinguish guest SErrors from hypervisor SErrors.
+  All SErrors will crash the whole system. This option will avoid all overhead
+  of the dsb/isb pairs.
 
 ### smap
 > `= <boolean> | hvm`
@@ -1541,9 +1668,6 @@ pages) must also be specified via the tbuf\_size parameter.
 > `= <boolean>`
 
 ### tmem\_compress
-> `= <boolean>`
-
-### tmem\_shared\_auth
 > `= <boolean>`
 
 ### tsc

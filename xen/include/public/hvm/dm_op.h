@@ -41,9 +41,9 @@
  * A domain supports a single 'legacy' IOREQ Server which is instantiated if
  * parameter...
  *
- * HVM_PARAM_IOREQ_PFN is read (to get the gmfn containing the synchronous
+ * HVM_PARAM_IOREQ_PFN is read (to get the gfn containing the synchronous
  * ioreq structures), or...
- * HVM_PARAM_BUFIOREQ_PFN is read (to get the gmfn containing the buffered
+ * HVM_PARAM_BUFIOREQ_PFN is read (to get the gfn containing the buffered
  * ioreq ring), or...
  * HVM_PARAM_BUFIOREQ_EVTCHN is read (to get the event channel that Xen uses
  * to request buffered I/O emulation).
@@ -81,14 +81,14 @@ struct xen_dm_op_create_ioreq_server {
  *
  * The emulator needs to map the synchronous ioreq structures and buffered
  * ioreq ring (if it exists) that Xen uses to request emulation. These are
- * hosted in the target domain's gmfns <ioreq_pfn> and <bufioreq_pfn>
+ * hosted in the target domain's gmfns <ioreq_gfn> and <bufioreq_gfn>
  * respectively. In addition, if the IOREQ Server is handling buffered
  * emulation requests, the emulator needs to bind to event channel
  * <bufioreq_port> to listen for them. (The event channels used for
  * synchronous emulation requests are specified in the per-CPU ioreq
- * structures in <ioreq_pfn>).
+ * structures in <ioreq_gfn>).
  * If the IOREQ Server is not handling buffered emulation requests then the
- * values handed back in <bufioreq_pfn> and <bufioreq_port> will both be 0.
+ * values handed back in <bufioreq_gfn> and <bufioreq_port> will both be 0.
  */
 #define XEN_DMOP_get_ioreq_server_info 2
 
@@ -98,10 +98,10 @@ struct xen_dm_op_get_ioreq_server_info {
     uint16_t pad;
     /* OUT - buffered ioreq port */
     evtchn_port_t bufioreq_port;
-    /* OUT - sync ioreq pfn */
-    uint64_aligned_t ioreq_pfn;
-    /* OUT - buffered ioreq pfn */
-    uint64_aligned_t bufioreq_pfn;
+    /* OUT - sync ioreq gfn */
+    uint64_aligned_t ioreq_gfn;
+    /* OUT - buffered ioreq gfn */
+    uint64_aligned_t bufioreq_gfn;
 };
 
 /*
@@ -150,7 +150,7 @@ struct xen_dm_op_ioreq_server_range {
  *
  * The IOREQ Server will not be passed any emulation requests until it is
  * in the enabled state.
- * Note that the contents of the ioreq_pfn and bufioreq_fn (see
+ * Note that the contents of the ioreq_gfn and bufioreq_gfn (see
  * XEN_DMOP_get_ioreq_server_info) are not meaningful until the IOREQ Server
  * is in the enabled state.
  */
@@ -237,13 +237,26 @@ struct xen_dm_op_set_pci_link_route {
  * XEN_DMOP_modified_memory: Notify that a set of pages were modified by
  *                           an emulator.
  *
- * NOTE: In the event of a continuation, the @first_pfn is set to the
- *       value of the pfn of the remaining set of pages and @nr reduced
- *       to the size of the remaining set.
+ * DMOP buf 1 contains an array of xen_dm_op_modified_memory_extent with
+ * @nr_extents entries.
+ *
+ * On error, @nr_extents will contain the index+1 of the extent that
+ * had the error.  It is not defined if or which pages may have been
+ * marked as dirty, in this event.
  */
 #define XEN_DMOP_modified_memory 11
 
 struct xen_dm_op_modified_memory {
+    /*
+     * IN - Number of extents to be processed
+     * OUT -returns n+1 for failing extent
+     */
+    uint32_t nr_extents;
+    /* IN/OUT - Must be set to 0 */
+    uint32_t opaque;
+};
+
+struct xen_dm_op_modified_memory_extent {
     /* IN - number of contiguous pages modified */
     uint32_t nr;
     uint32_t pad;
@@ -318,6 +331,43 @@ struct xen_dm_op_inject_msi {
     uint64_aligned_t addr;
 };
 
+/*
+ * XEN_DMOP_map_mem_type_to_ioreq_server : map or unmap the IOREQ Server <id>
+ *                                      to specific memory type <type>
+ *                                      for specific accesses <flags>
+ *
+ * For now, flags only accept the value of XEN_DMOP_IOREQ_MEM_ACCESS_WRITE,
+ * which means only write operations are to be forwarded to an ioreq server.
+ * Support for the emulation of read operations can be added when an ioreq
+ * server has such requirement in future.
+ */
+#define XEN_DMOP_map_mem_type_to_ioreq_server 15
+
+struct xen_dm_op_map_mem_type_to_ioreq_server {
+    ioservid_t id;      /* IN - ioreq server id */
+    uint16_t type;      /* IN - memory type */
+    uint32_t flags;     /* IN - types of accesses to be forwarded to the
+                           ioreq server. flags with 0 means to unmap the
+                           ioreq server */
+
+#define XEN_DMOP_IOREQ_MEM_ACCESS_READ (1u << 0)
+#define XEN_DMOP_IOREQ_MEM_ACCESS_WRITE (1u << 1)
+
+    uint64_t opaque;    /* IN/OUT - only used for hypercall continuation,
+                           has to be set to zero by the caller */
+};
+
+/*
+ * XEN_DMOP_remote_shutdown : Declare a shutdown for another domain
+ *                            Identical to SCHEDOP_remote_shutdown
+ */
+#define XEN_DMOP_remote_shutdown 16
+
+struct xen_dm_op_remote_shutdown {
+    uint32_t reason;       /* SHUTDOWN_* => enum sched_shutdown_reason */
+                           /* (Other reason values are not blocked) */
+};
+
 struct xen_dm_op {
     uint32_t op;
     uint32_t pad;
@@ -336,6 +386,9 @@ struct xen_dm_op {
         struct xen_dm_op_set_mem_type set_mem_type;
         struct xen_dm_op_inject_event inject_event;
         struct xen_dm_op_inject_msi inject_msi;
+        struct xen_dm_op_map_mem_type_to_ioreq_server
+                map_mem_type_to_ioreq_server;
+        struct xen_dm_op_remote_shutdown remote_shutdown;
     } u;
 };
 
@@ -350,17 +403,17 @@ DEFINE_XEN_GUEST_HANDLE(xen_dm_op_buf_t);
 
 /* ` enum neg_errnoval
  * ` HYPERVISOR_dm_op(domid_t domid,
- * `                  xen_dm_op_buf_t bufs[],
- * `                  unsigned int nr_bufs)
+ * `                  unsigned int nr_bufs,
+ * `                  xen_dm_op_buf_t bufs[])
  * `
  *
  * @domid is the domain the hypercall operates on.
+ * @nr_bufs is the number of buffers in the @bufs array.
  * @bufs points to an array of buffers where @bufs[0] contains a struct
  * xen_dm_op, describing the specific device model operation and its
  * parameters.
  * @bufs[1..] may be referenced in the parameters for the purposes of
  * passing extra information to or from the domain.
- * @nr_bufs is the number of buffers in the @bufs array.
  */
 
 #endif /* __XEN_PUBLIC_HVM_DM_OP_H__ */

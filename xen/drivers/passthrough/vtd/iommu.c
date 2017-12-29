@@ -48,7 +48,7 @@ struct mapped_rmrr {
 };
 
 /* Possible unfiltered LAPIC/MSI messages from untrusted sources? */
-bool_t __read_mostly untrusted_msi;
+bool __read_mostly untrusted_msi;
 
 int nr_iommus;
 
@@ -747,14 +747,24 @@ static void iommu_enable_translation(struct acpi_drhd_unit *drhd)
     unsigned long flags;
     struct iommu *iommu = drhd->iommu;
 
-    if ( is_igd_drhd(drhd) && !is_igd_vt_enabled_quirk() ) 
+    if ( is_igd_drhd(drhd) )
     {
-        if ( force_iommu )
-            panic("BIOS did not enable IGD for VT properly, crash Xen for security purpose");
+        if ( !iommu_igfx )
+        {
+            printk(XENLOG_INFO VTDPREFIX
+                   "Passed iommu=no-igfx option.  Disabling IGD VT-d engine.\n");
+            return;
+        }
 
-        printk(XENLOG_WARNING VTDPREFIX
-               "BIOS did not enable IGD for VT properly.  Disabling IGD VT-d engine.\n");
-        return;
+        if ( !is_igd_vt_enabled_quirk() )
+        {
+            if ( force_iommu )
+                panic("BIOS did not enable IGD for VT properly, crash Xen for security purpose");
+
+            printk(XENLOG_WARNING VTDPREFIX
+                   "BIOS did not enable IGD for VT properly.  Disabling IGD VT-d engine.\n");
+            return;
+        }
     }
 
     /* apply platform specific errata workarounds */
@@ -2334,7 +2344,7 @@ static int reassign_device_ownership(
      * by the root complex unless interrupt remapping is enabled.
      */
     if ( (target != hardware_domain) && !iommu_intremap )
-        untrusted_msi = 1;
+        untrusted_msi = true;
 
     /*
      * If the device belongs to the hardware domain, and it has RMRR, don't

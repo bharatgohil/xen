@@ -238,7 +238,7 @@ static int __init pvh_setup_vmx_realmode_helpers(struct domain *d)
     if ( !pvh_steal_ram(d, HVM_VM86_TSS_SIZE, 128, GB(4), &gaddr) )
     {
         if ( hvm_copy_to_guest_phys(gaddr, NULL, HVM_VM86_TSS_SIZE, v) !=
-             HVMCOPY_okay )
+             HVMTRANS_okay )
             printk("Unable to zero VM86 TSS area\n");
         d->arch.hvm_domain.params[HVM_PARAM_VM86_TSS_SIZED] =
             VM86_TSS_UPDATED | ((uint64_t)HVM_VM86_TSS_SIZE << 32) | gaddr;
@@ -614,6 +614,7 @@ static int __init pvh_setup_cpus(struct domain *d, paddr_t entry,
 
     update_domain_wallclock_time(d);
 
+    v->is_initialised = 1;
     clear_bit(_VPF_down, &v->pause_flags);
 
     return 0;
@@ -681,12 +682,7 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
     max_vcpus = dom0_max_vcpus();
     /* Calculate the size of the crafted MADT. */
     size = sizeof(*madt);
-    /*
-     * FIXME: the current vIO-APIC code just supports one IO-APIC instance
-     * per domain. This must be fixed in order to provide the same amount of
-     * IO APICs as available on bare metal.
-     */
-    size += sizeof(*io_apic);
+    size += sizeof(*io_apic) * nr_ioapics;
     size += sizeof(*intsrcovr) * acpi_intr_overrides;
     size += sizeof(*nmisrc) * acpi_nmi_sources;
     size += sizeof(*x2apic) * max_vcpus;
@@ -716,23 +712,19 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
      */
     madt->header.revision = min_t(unsigned char, table->revision, 4);
 
-    /*
-     * Setup the IO APIC entry.
-     * FIXME: the current vIO-APIC code just supports one IO-APIC instance
-     * per domain. This must be fixed in order to provide the same amount of
-     * IO APICs as available on bare metal, and with the same IDs as found in
-     * the native IO APIC MADT entries.
-     */
-    if ( nr_ioapics > 1 )
-        printk("WARNING: found %d IO APICs, Dom0 will only have access to 1 emulated IO APIC\n",
-               nr_ioapics);
+    /* Setup the IO APIC entries. */
     io_apic = (void *)(madt + 1);
-    io_apic->header.type = ACPI_MADT_TYPE_IO_APIC;
-    io_apic->header.length = sizeof(*io_apic);
-    io_apic->id = domain_vioapic(d)->id;
-    io_apic->address = VIOAPIC_DEFAULT_BASE_ADDRESS;
+    for ( i = 0; i < nr_ioapics; i++ )
+    {
+        io_apic->header.type = ACPI_MADT_TYPE_IO_APIC;
+        io_apic->header.length = sizeof(*io_apic);
+        io_apic->id = domain_vioapic(d, i)->id;
+        io_apic->address = domain_vioapic(d, i)->base_address;
+        io_apic->global_irq_base = domain_vioapic(d, i)->base_gsi;
+        io_apic++;
+    }
 
-    x2apic = (void *)(io_apic + 1);
+    x2apic = (void *)io_apic;
     for ( i = 0; i < max_vcpus; i++ )
     {
         x2apic->header.type = ACPI_MADT_TYPE_LOCAL_X2APIC;

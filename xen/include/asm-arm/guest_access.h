@@ -3,18 +3,16 @@
 
 #include <xen/guest_access.h>
 #include <xen/errno.h>
-
-/* Guests have their own comlete address space */
-#define access_ok(addr,size) (1)
-
-#define array_access_ok(addr,count,size) \
-    (likely(count < (~0UL/size)) && access_ok(addr,count*size))
+#include <xen/sched.h>
 
 unsigned long raw_copy_to_guest(void *to, const void *from, unsigned len);
 unsigned long raw_copy_to_guest_flush_dcache(void *to, const void *from,
                                              unsigned len);
 unsigned long raw_copy_from_guest(void *to, const void *from, unsigned len);
 unsigned long raw_clear_guest(void *to, unsigned len);
+
+int access_guest_memory_by_ipa(struct domain *d, paddr_t ipa, void *buf,
+                               uint32_t size, bool is_write);
 
 #define __raw_copy_to_guest raw_copy_to_guest
 #define __raw_copy_from_guest raw_copy_from_guest

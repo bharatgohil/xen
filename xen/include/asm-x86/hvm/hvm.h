@@ -173,6 +173,7 @@ struct hvm_function_table {
     void (*handle_cd)(struct vcpu *v, unsigned long value);
     void (*set_info_guest)(struct vcpu *v);
     void (*set_rdtsc_exiting)(struct vcpu *v, bool_t);
+    void (*set_descriptor_access_exiting)(struct vcpu *v, bool);
 
     /* Nested HVM */
     int (*nhvm_vcpu_initialise)(struct vcpu *v);
@@ -194,6 +195,7 @@ struct hvm_function_table {
     void (*process_isr)(int isr, struct vcpu *v);
     void (*deliver_posted_intr)(struct vcpu *v, u8 vector);
     void (*sync_pir_to_irr)(struct vcpu *v);
+    bool (*test_pir)(const struct vcpu *v, uint8_t vector);
     void (*handle_eoi)(u8 vector);
 
     /*Walk nested p2m  */
@@ -235,7 +237,8 @@ extern s8 hvm_port80_allowed;
 extern const struct hvm_function_table *start_svm(void);
 extern const struct hvm_function_table *start_vmx(void);
 
-int hvm_domain_initialise(struct domain *d);
+int hvm_domain_initialise(struct domain *d, unsigned long domcr_flags,
+                          struct xen_arch_domainconfig *config);
 void hvm_domain_relinquish_resources(struct domain *d);
 void hvm_domain_destroy(struct domain *d);
 void hvm_domain_soft_reset(struct domain *d);
@@ -302,12 +305,7 @@ int hvm_girq_dest_2_vcpu_id(struct domain *d, uint8_t dest, uint8_t dest_mode);
 #define hap_has_1gb (!!(hvm_funcs.hap_capabilities & HVM_HAP_SUPERPAGE_1GB))
 #define hap_has_2mb (!!(hvm_funcs.hap_capabilities & HVM_HAP_SUPERPAGE_2MB))
 
-/* Can the guest use 1GB superpages in its own pagetables? */
-#define hvm_pse1gb_supported(d) \
-    (cpu_has_page1gb && paging_mode_hap(d))
-
-#define hvm_long_mode_enabled(v) \
-    ((v)->arch.hvm_vcpu.guest_efer & EFER_LMA)
+#define hvm_long_mode_active(v) (!!((v)->arch.hvm_vcpu.guest_efer & EFER_LMA))
 
 enum hvm_intblk
 hvm_interrupt_blocked(struct vcpu *v, struct hvm_intack intack);
@@ -477,7 +475,7 @@ bool_t hvm_virtual_to_linear_addr(
     unsigned long offset,
     unsigned int bytes,
     enum hvm_access_type access_type,
-    unsigned int addr_size,
+    const struct segment_register *active_cs,
     unsigned long *linear_addr);
 
 void *hvm_map_guest_frame_rw(unsigned long gfn, bool_t permanent,

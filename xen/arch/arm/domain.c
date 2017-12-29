@@ -9,6 +9,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#include <xen/bitops.h>
+#include <xen/errno.h>
+#include <xen/grant_table.h>
 #include <xen/hypercall.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -16,44 +19,66 @@
 #include <xen/sched.h>
 #include <xen/softirq.h>
 #include <xen/wait.h>
-#include <xen/errno.h>
-#include <xen/bitops.h>
-#include <xen/grant_table.h>
 
+#include <asm/alternative.h>
+#include <asm/cpufeature.h>
 #include <asm/current.h>
 #include <asm/event.h>
-#include <asm/guest_access.h>
-#include <asm/regs.h>
-#include <asm/p2m.h>
-#include <asm/irq.h>
-#include <asm/cpufeature.h>
-#include <asm/vfp.h>
-#include <asm/procinfo.h>
-
 #include <asm/gic.h>
-#include <asm/vgic.h>
+#include <asm/guest_access.h>
+#include <asm/irq.h>
+#include <asm/p2m.h>
 #include <asm/platform.h>
-#include "vtimer.h"
+#include <asm/procinfo.h>
+#include <asm/regs.h>
+#include <asm/vfp.h>
+#include <asm/vgic.h>
+#include <asm/vtimer.h>
+
 #include "vuart.h"
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
 
+static void do_idle(void)
+{
+    unsigned int cpu = smp_processor_id();
+
+    sched_tick_suspend();
+    /* sched_tick_suspend() can raise TIMER_SOFTIRQ. Process it now. */
+    process_pending_softirqs();
+
+    local_irq_disable();
+    if ( cpu_is_haltable(cpu) )
+    {
+        dsb(sy);
+        wfi();
+    }
+    local_irq_enable();
+
+    sched_tick_resume();
+}
+
 void idle_loop(void)
 {
+    unsigned int cpu = smp_processor_id();
+
     for ( ; ; )
     {
-        if ( cpu_is_offline(smp_processor_id()) )
+        if ( cpu_is_offline(cpu) )
             stop_cpu();
 
-        local_irq_disable();
-        if ( cpu_is_haltable(smp_processor_id()) )
-        {
-            dsb(sy);
-            wfi();
-        }
-        local_irq_enable();
+        /* Are we here for running vcpu context tasklets, or for idling? */
+        if ( unlikely(tasklet_work_to_do(cpu)) )
+            do_tasklet();
+        /*
+         * Test softirqs twice --- first to see if should even try scrubbing
+         * and then, after it is done, whether softirqs became pending
+         * while we were scrubbing.
+         */
+        else if ( !softirq_pending(cpu) && !scrub_free_pages() &&
+                  !softirq_pending(cpu) )
+            do_idle();
 
-        do_tasklet();
         do_softirq();
         /*
          * We MUST be last (or before dsb, wfi). Otherwise after we get the
@@ -312,6 +337,17 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
 
     local_irq_disable();
 
+    /*
+     * If the serrors_op is "FORWARD", we have to prevent forwarding
+     * SError to wrong vCPU. So before context switch, we have to use
+     * the SYNCRONIZE_SERROR to guarantee that the pending SError would
+     * be caught by current vCPU.
+     *
+     * The SKIP_CTXT_SWITCH_SERROR_SYNC will be set to cpu_hwcaps when the
+     * serrors_op is NOT "FORWARD".
+     */
+    SYNCHRONIZE_SERROR(SKIP_CTXT_SWITCH_SERROR_SYNC);
+
     set_current(next);
 
     prev = __context_switch(prev, next);
@@ -345,11 +381,6 @@ void sync_vcpu_execstate(struct vcpu *v)
     }                                                                       \
     __arg;                                                                  \
 })
-
-void hypercall_cancel_continuation(void)
-{
-    current->hcall_preempted = false;
-}
 
 unsigned long hypercall_create_continuation(
     unsigned int op, const char *format, ...)
@@ -455,13 +486,11 @@ struct domain *alloc_domain_struct(void)
         return NULL;
 
     clear_page(d);
-    d->arch.grant_table_gfn = xzalloc_array(gfn_t, max_grant_frames);
     return d;
 }
 
 void free_domain_struct(struct domain *d)
 {
-    xfree(d->arch.grant_table_gfn);
     free_xenheap_page(d);
 }
 
@@ -513,6 +542,8 @@ int vcpu_initialise(struct vcpu *v)
 
     v->arch.actlr = READ_SYSREG32(ACTLR_EL1);
 
+    v->arch.hcr_el2 = get_default_hcr_flags();
+
     processor_vcpu_initialise(v);
 
     if ( (rc = vcpu_vgic_init(v)) != 0 )
@@ -533,6 +564,11 @@ void vcpu_destroy(struct vcpu *v)
     vcpu_timer_destroy(v);
     vcpu_vgic_free(v);
     free_xenheap_pages(v->arch.stack, STACK_ORDER);
+}
+
+void vcpu_switch_to_aarch64_mode(struct vcpu *v)
+{
+    v->arch.hcr_el2 |= HCR_RW;
 }
 
 int arch_domain_create(struct domain *d, unsigned int domcr_flags,
@@ -835,6 +871,12 @@ int domain_relinquish_resources(struct domain *d)
         ret = iommu_release_dt_devices(d);
         if ( ret )
             return ret;
+
+        /*
+         * Release the resources allocated for vpl011 which were
+         * allocated via a DOMCTL call XEN_DOMCTL_vuart_op.
+         */
+        domain_vpl011_deinit(d);
 
         d->arch.relmem = RELMEM_xen;
         /* Fallthrough */

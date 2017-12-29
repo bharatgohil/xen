@@ -31,8 +31,13 @@ type t =
 	mutable io_credit: int; (* the rounds of ring process left to do, default is 0,
 	                           usually set to 1 when there is work detected, could
 	                           also set to n to give "lazy" clients extra credit *)
+	mutable conflict_credit: float; (* Must be positive to perform writes; a commit
+	                                   that later causes conflict with another
+	                                   domain's transaction costs credit. *)
+	mutable caused_conflicts: int64;
 }
 
+let is_dom0 d = d.id = 0
 let get_path dom = "/local/domain/" ^ (sprintf "%u" dom.id)
 let get_id domain = domain.id
 let get_interface d = d.interface
@@ -48,12 +53,16 @@ let set_io_credit ?(n=1) domain = domain.io_credit <- max 0 n
 let incr_io_credit domain = domain.io_credit <- domain.io_credit + 1
 let decr_io_credit domain = domain.io_credit <- max 0 (domain.io_credit - 1)
 
+let is_paused_for_conflict dom = dom.conflict_credit <= 0.0
+
+let is_free_to_conflict = is_dom0
+
 let string_of_port = function
 | None -> "None"
 | Some x -> string_of_int (Xeneventchn.to_int x)
 
 let dump d chan =
-	fprintf chan "dom,%d,%nd,%s\n" d.id d.mfn (string_of_port d.port)
+	fprintf chan "dom,%d,%nd,%d\n" d.id d.mfn d.remote_port
 
 let notify dom = match dom.port with
 | None ->
@@ -63,7 +72,7 @@ let notify dom = match dom.port with
 
 let bind_interdomain dom =
 	dom.port <- Some (Event.bind_interdomain dom.eventchn dom.id dom.remote_port);
-	debug "domain %d bound port %s" dom.id (string_of_port dom.port)
+	debug "bound domain %d remote port %d to local port %s" dom.id dom.remote_port (string_of_port dom.port)
 
 
 let close dom =
@@ -84,6 +93,12 @@ let make id mfn remote_port interface eventchn = {
 	port = None;
 	bad_client = false;
 	io_credit = 0;
+	conflict_credit = !Define.conflict_burst_limit;
+	caused_conflicts = 0L;
 }
 
-let is_dom0 d = d.id = 0
+let log_and_reset_conflict_stats logfn dom =
+	if dom.caused_conflicts > 0L then (
+		logfn dom.id dom.caused_conflicts;
+		dom.caused_conflicts <- 0L
+	)

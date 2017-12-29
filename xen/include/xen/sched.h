@@ -230,6 +230,7 @@ struct vcpu
     int              controller_pause_count;
 
     /* Grant table map tracking. */
+    spinlock_t       maptrack_freelist_lock;
     unsigned int     maptrack_head;
     unsigned int     maptrack_tail;
 
@@ -293,16 +294,6 @@ struct vm_event_domain
     unsigned int blocked;
     /* The last vcpu woken up */
     unsigned int last_vcpu_wake_up;
-};
-
-struct vm_event_per_domain
-{
-    /* Memory sharing support */
-    struct vm_event_domain share;
-    /* Memory paging support */
-    struct vm_event_domain paging;
-    /* VM event monitor support */
-    struct vm_event_domain monitor;
 };
 
 struct evtchn_port_ops;
@@ -464,7 +455,17 @@ struct domain
     struct lock_profile_qhead profile_head;
 
     /* Various vm_events */
-    struct vm_event_per_domain *vm_event;
+
+    /* Memory sharing support */
+#ifdef CONFIG_HAS_MEM_SHARING
+    struct vm_event_domain *vm_event_share;
+#endif
+    /* Memory paging support */
+#ifdef CONFIG_HAS_MEM_PAGING
+    struct vm_event_domain *vm_event_paging;
+#endif
+    /* VM event monitor support */
+    struct vm_event_domain *vm_event_monitor;
 
     /*
      * Can be specified by the user. If that is not the case, it is
@@ -581,11 +582,10 @@ int rcu_lock_remote_domain_by_id(domid_t dom, struct domain **d);
  */
 int rcu_lock_live_remote_domain_by_id(domid_t dom, struct domain **d);
 
-/* Finish a RCU critical region started by rcu_lock_domain_by_id(). */
 static inline void rcu_unlock_domain(struct domain *d)
 {
     if ( d != current->domain )
-        rcu_read_unlock(&domlist_read_lock);
+        rcu_read_unlock(d);
 }
 
 static inline struct domain *rcu_lock_domain(struct domain *d)
@@ -706,7 +706,11 @@ extern void (*dead_idle) (void);
  */
 unsigned long hypercall_create_continuation(
     unsigned int op, const char *format, ...);
-void hypercall_cancel_continuation(void);
+
+static inline void hypercall_cancel_continuation(struct vcpu *v)
+{
+    v->hcall_preempted = false;
+}
 
 /*
  * For long-running operations that must be in hypercall context, check
@@ -788,6 +792,9 @@ static inline struct domain *next_domain_in_cpupool(
  /* VCPU is being reset. */
 #define _VPF_in_reset        7
 #define VPF_in_reset         (1UL<<_VPF_in_reset)
+/* VCPU is parked. */
+#define _VPF_parked          8
+#define VPF_parked           (1UL<<_VPF_parked)
 
 static inline int vcpu_runnable(struct vcpu *v)
 {
@@ -843,10 +850,17 @@ uint64_t get_cpu_idle_time(unsigned int cpu);
 
 /*
  * Used by idle loop to decide whether there is work to do:
- *  (1) Run softirqs; or (2) Play dead; or (3) Run tasklets.
+ *  (1) Deal with RCU; (2) or run softirqs; or (3) Play dead;
+ *  or (4) Run tasklets.
+ *
+ * About (3), if a tasklet is enqueued, it will be scheduled
+ * really really soon, and hence it's pointless to try to
+ * sleep between these two events (that's why we don't call
+ * the tasklet_work_to_do() helper).
  */
 #define cpu_is_haltable(cpu)                    \
-    (!softirq_pending(cpu) &&                   \
+    (!rcu_needs_cpu(cpu) &&                     \
+     !softirq_pending(cpu) &&                   \
      cpu_online(cpu) &&                         \
      !per_cpu(tasklet_work_to_do, cpu))
 
@@ -903,7 +917,7 @@ int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op);
 void schedule_dump(struct cpupool *c);
 extern void dump_runq(unsigned char key);
 
-void arch_do_physinfo(xen_sysctl_physinfo_t *pi);
+void arch_do_physinfo(struct xen_sysctl_physinfo *pi);
 
 #endif /* __SCHED_H__ */
 

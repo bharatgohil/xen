@@ -39,6 +39,10 @@
 #define PCI_SBDF3(s,b,df) ((((s) & 0xffff) << 16) | PCI_BDF2(b, df))
 
 struct pci_dev_info {
+    /*
+     * VF's 'is_extfn' field is used to indicate whether its PF is an extended
+     * function.
+     */
     bool_t is_extfn;
     bool_t is_virtfn;
     struct {
@@ -125,8 +129,8 @@ int pci_ro_device(int seg, int bus, int devfn);
 int pci_hide_device(int bus, int devfn);
 struct pci_dev *pci_get_pdev(int seg, int bus, int devfn);
 struct pci_dev *pci_get_real_pdev(int seg, int bus, int devfn);
-struct pci_dev *pci_get_pdev_by_domain(
-    struct domain *, int seg, int bus, int devfn);
+struct pci_dev *pci_get_pdev_by_domain(const struct domain *, int seg,
+                                       int bus, int devfn);
 void pci_check_disable_device(u16 seg, u8 bus, u8 devfn);
 
 uint8_t pci_conf_read8(

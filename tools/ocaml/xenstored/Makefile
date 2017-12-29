@@ -53,6 +53,7 @@ OBJS = paths \
 	domains \
 	connection \
 	connections \
+	history \
 	parse_arg \
 	process \
 	xenstored
@@ -88,6 +89,10 @@ install: all
 	$(INSTALL_PROG) oxenstored $(DESTDIR)$(sbindir)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_CONFIG_DIR)
 	$(INSTALL_DATA) oxenstored.conf $(DESTDIR)$(XEN_CONFIG_DIR)
+
+uninstall:
+	rm -f $(DESTDIR)$(XEN_CONFIG_DIR)/oxenstored.conf
+	rm -f $(DESTDIR)$(sbindir)/oxenstored
 
 include $(OCAML_TOPLEVEL)/Makefile.rules
 

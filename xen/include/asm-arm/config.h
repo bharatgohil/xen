@@ -19,10 +19,10 @@
 #define BITS_PER_LONG (BYTES_PER_LONG << 3)
 #define POINTER_ALIGN BYTES_PER_LONG
 
+#define BITS_PER_LLONG 64
+
 /* xen_ulong_t is always 64 bits */
 #define BITS_PER_XEN_ULONG 64
-
-#define CONFIG_PAGING_ASSISTANCE 1
 
 #define CONFIG_PAGING_LEVELS 3
 
@@ -47,8 +47,6 @@
 #endif
 
 #define INVALID_VCPU_ID MAX_VIRT_CPUS
-
-#define asmlinkage /* Nothing needed */
 
 #define __LINUX_ARM_ARCH__ 7
 #define CONFIG_AEABI
@@ -77,12 +75,12 @@
  *   0  -   2M   Unmapped
  *   2M -   4M   Xen text, data, bss
  *   4M -   6M   Fixmap: special-purpose 4K mapping slots
- *   6M -   8M   Early boot mapping of FDT
- *   8M -  10M   Early relocation address (used when relocating Xen)
+ *   6M -  10M   Early boot mapping of FDT
+ *   10M - 12M   Early relocation address (used when relocating Xen)
  *               and later for livepatch vmap (if compiled in)
  *
  * ARM32 layout:
- *   0  -  10M   <COMMON>
+ *   0  -  12M   <COMMON>
  *
  *  32M - 128M   Frametable: 24 bytes per page for 16GB of RAM
  * 256M -   1G   VMAP: ioremap and early_ioremap use this virtual address
@@ -93,7 +91,7 @@
  *
  * ARM64 layout:
  * 0x0000000000000000 - 0x0000007fffffffff (512GB, L0 slot [0])
- *   0  -  10M   <COMMON>
+ *   0  -  12M   <COMMON>
  *
  *   1G -   2G   VMAP: ioremap and early_ioremap
  *
@@ -111,10 +109,14 @@
 
 #define XEN_VIRT_START         _AT(vaddr_t,0x00200000)
 #define FIXMAP_ADDR(n)        (_AT(vaddr_t,0x00400000) + (n) * PAGE_SIZE)
+
 #define BOOT_FDT_VIRT_START    _AT(vaddr_t,0x00600000)
-#define BOOT_RELOC_VIRT_START  _AT(vaddr_t,0x00800000)
+#define BOOT_FDT_SLOT_SIZE     MB(4)
+#define BOOT_FDT_VIRT_END      (BOOT_FDT_VIRT_START + BOOT_FDT_SLOT_SIZE)
+
+#define BOOT_RELOC_VIRT_START  _AT(vaddr_t,0x00a00000)
 #ifdef CONFIG_LIVEPATCH
-#define LIVEPATCH_VMAP_START   _AT(vaddr_t,0x00800000)
+#define LIVEPATCH_VMAP_START   _AT(vaddr_t,0x00a00000)
 #define LIVEPATCH_VMAP_END     (LIVEPATCH_VMAP_START + MB(2))
 #endif
 

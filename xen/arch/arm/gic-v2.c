@@ -483,7 +483,7 @@ static void gicv2_write_lr(int lr, const struct gic_lr *lr_reg)
     writel_gich(lrv, GICH_LR + lr * 4);
 }
 
-static void gicv2_hcr_status(uint32_t flag, bool_t status)
+static void gicv2_hcr_status(uint32_t flag, bool status)
 {
     uint32_t hcr = readl_gich(GICH_HCR);
 
@@ -597,9 +597,9 @@ static int gicv2_map_hwdown_extra_mappings(struct domain *d)
                d->domain_id, v2m_data->addr, v2m_data->size,
                v2m_data->spi_start, v2m_data->nr_spis);
 
-        ret = map_mmio_regions(d, _gfn(paddr_to_pfn(v2m_data->addr)),
-                            DIV_ROUND_UP(v2m_data->size, PAGE_SIZE),
-                            _mfn(paddr_to_pfn(v2m_data->addr)));
+        ret = map_mmio_regions(d, gaddr_to_gfn(v2m_data->addr),
+                               PFN_UP(v2m_data->size),
+                               maddr_to_mfn(v2m_data->addr));
         if ( ret )
         {
             printk(XENLOG_ERR "GICv2: Map v2m frame to d%d failed.\n",
@@ -815,7 +815,7 @@ static hw_irq_controller gicv2_guest_irq_type = {
     .set_affinity = gicv2_irq_set_affinity,
 };
 
-static bool_t gicv2_is_aliased(paddr_t cbase, paddr_t csize)
+static bool gicv2_is_aliased(paddr_t cbase, paddr_t csize)
 {
     uint32_t val_low, val_high;
 
@@ -1012,6 +1012,11 @@ static int gicv2_iomem_deny_access(const struct domain *d)
     return iomem_deny_access(d, mfn, mfn + nr);
 }
 
+static unsigned long gicv2_get_hwdom_extra_madt_size(const struct domain *d)
+{
+    return 0;
+}
+
 #ifdef CONFIG_ACPI
 static int gicv2_make_hwdom_madt(const struct domain *d, u32 offset)
 {
@@ -1034,7 +1039,7 @@ static int gicv2_make_hwdom_madt(const struct domain *d, u32 offset)
     for ( i = 0; i < d->max_vcpus; i++ )
     {
         gicc = (struct acpi_madt_generic_interrupt *)(base_ptr + table_len);
-        ACPI_MEMCPY(gicc, host_gicc, size);
+        memcpy(gicc, host_gicc, size);
         gicc->cpu_interface_number = i;
         gicc->uid = i;
         gicc->flags = ACPI_MADT_ENABLED;
@@ -1217,6 +1222,12 @@ static int __init gicv2_init(void)
     return 0;
 }
 
+static void gicv2_do_LPI(unsigned int lpi)
+{
+    /* No LPIs in a GICv2 */
+    BUG();
+}
+
 const static struct gic_hw_operations gicv2_ops = {
     .info                = &gicv2_info,
     .init                = gicv2_init,
@@ -1242,8 +1253,10 @@ const static struct gic_hw_operations gicv2_ops = {
     .read_apr            = gicv2_read_apr,
     .make_hwdom_dt_node  = gicv2_make_hwdom_dt_node,
     .make_hwdom_madt     = gicv2_make_hwdom_madt,
+    .get_hwdom_extra_madt_size = gicv2_get_hwdom_extra_madt_size,
     .map_hwdom_extra_mappings = gicv2_map_hwdown_extra_mappings,
     .iomem_deny_access   = gicv2_iomem_deny_access,
+    .do_LPI              = gicv2_do_LPI,
 };
 
 /* Set up the GIC */

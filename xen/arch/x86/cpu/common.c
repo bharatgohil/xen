@@ -54,6 +54,7 @@ unsigned int vaddr_bits __read_mostly = VADDR_BITS;
 u64 host_pat = 0x050100070406;
 
 static unsigned int cleared_caps[NCAPINTS];
+static unsigned int forced_caps[NCAPINTS];
 
 void __init setup_clear_cpu_cap(unsigned int cap)
 {
@@ -62,6 +63,10 @@ void __init setup_clear_cpu_cap(unsigned int cap)
 
 	if (__test_and_set_bit(cap, cleared_caps))
 		return;
+
+	if (test_bit(cap, forced_caps))
+		printk("%pS clearing previously forced feature %#x\n",
+		       __builtin_return_address(0), cap);
 
 	__clear_bit(cap, boot_cpu_data.x86_capability);
 	dfs = lookup_deep_deps(cap);
@@ -72,7 +77,26 @@ void __init setup_clear_cpu_cap(unsigned int cap)
 	for (i = 0; i < FSCAPINTS; ++i) {
 		cleared_caps[i] |= dfs[i];
 		boot_cpu_data.x86_capability[i] &= ~dfs[i];
+		if (!(forced_caps[i] & dfs[i]))
+			continue;
+		printk("%pS implicitly clearing previously forced feature(s) %u:%#x\n",
+		       __builtin_return_address(0),
+		       i, forced_caps[i] & dfs[i]);
 	}
+}
+
+void __init setup_force_cpu_cap(unsigned int cap)
+{
+	if (__test_and_set_bit(cap, forced_caps))
+		return;
+
+	if (test_bit(cap, cleared_caps)) {
+		printk("%pS tries to force previously cleared feature %#x\n",
+		       __builtin_return_address(0), cap);
+		return;
+	}
+
+	__set_bit(cap, boot_cpu_data.x86_capability);
 }
 
 static void default_init(struct cpuinfo_x86 * c)
@@ -252,6 +276,8 @@ static void __init early_cpu_detect(void)
 		if (hap_paddr_bits > PADDR_BITS)
 			hap_paddr_bits = PADDR_BITS;
 	}
+
+	initialize_cpu_data(0);
 }
 
 static void generic_identify(struct cpuinfo_x86 *c)
@@ -373,8 +399,10 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	for (i = 0; i < FSCAPINTS; ++i)
 		c->x86_capability[i] &= known_features[i];
 
-	for (i = 0 ; i < NCAPINTS ; ++i)
+	for (i = 0 ; i < NCAPINTS ; ++i) {
+		c->x86_capability[i] |= forced_caps[i];
 		c->x86_capability[i] &= ~cleared_caps[i];
+	}
 
 	/* If the model name is still unset, do table lookup. */
 	if ( !c->x86_model_id[0] ) {
@@ -612,6 +640,7 @@ void __init early_cpu_init(void)
  * - Sets up TSS with stack pointers, including ISTs
  * - Inserts TSS selector into regular and compat GDTs
  * - Loads GDT, IDT, TR then null LDT
+ * - Sets up IST references in the IDT
  */
 void load_system_tables(void)
 {
@@ -634,14 +663,29 @@ void load_system_tables(void)
 		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
 	};
 
-	/* Main stack for interrupts/exceptions. */
-	tss->rsp0 = stack_bottom;
-	tss->bitmap = IOBMP_INVALID_OFFSET;
+	*tss = (struct tss_struct){
+		/* Main stack for interrupts/exceptions. */
+		.rsp0 = stack_bottom,
 
-	/* MCE, NMI and Double Fault handlers get their own stacks. */
-	tss->ist[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE;
-	tss->ist[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE;
-	tss->ist[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE;
+		/* Ring 1 and 2 stacks poisoned. */
+		.rsp1 = 0x8600111111111111ul,
+		.rsp2 = 0x8600111111111111ul,
+
+		/*
+		 * MCE, NMI and Double Fault handlers get their own stacks.
+		 * All others poisoned.
+		 */
+		.ist = {
+			[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE,
+			[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE,
+			[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE,
+
+			[IST_MAX ... ARRAY_SIZE(tss->ist) - 1] =
+				0x8600111111111111ul,
+		},
+
+		.bitmap = IOBMP_INVALID_OFFSET,
+	};
 
 	_set_tssldt_desc(
 		gdt + TSS_ENTRY,
@@ -658,6 +702,10 @@ void load_system_tables(void)
 	asm volatile ("lidt %0"  : : "m"  (idtr) );
 	asm volatile ("ltr  %w0" : : "rm" (TSS_ENTRY << 3) );
 	asm volatile ("lldt %w0" : : "rm" (0) );
+
+	set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_DF);
+	set_ist(&idt_tables[cpu][TRAP_nmi],	      IST_NMI);
+	set_ist(&idt_tables[cpu][TRAP_machine_check], IST_MCE);
 
 	/*
 	 * Bottom-of-stack must be 16-byte aligned!

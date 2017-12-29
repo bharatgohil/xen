@@ -243,7 +243,8 @@ extern void init_maintenance_interrupt(void);
 extern void gic_raise_guest_irq(struct vcpu *v, unsigned int irq,
         unsigned int priority);
 extern void gic_raise_inflight_irq(struct vcpu *v, unsigned int virtual_irq);
-extern void gic_remove_from_queues(struct vcpu *v, unsigned int virtual_irq);
+extern void gic_remove_from_lr_pending(struct vcpu *v, struct pending_irq *p);
+extern void gic_remove_irq_from_queues(struct vcpu *v, struct pending_irq *p);
 
 /* Accept an interrupt from the GIC and dispatch its handler */
 extern void gic_interrupt(struct cpu_user_regs *regs, int is_fiq);
@@ -344,7 +345,7 @@ struct gic_hw_operations {
     void (*update_lr)(int lr, const struct pending_irq *pending_irq,
                       unsigned int state);
     /* Update HCR status register */
-    void (*update_hcr_status)(uint32_t flag, bool_t set);
+    void (*update_hcr_status)(uint32_t flag, bool set);
     /* Clear LR register */
     void (*clear_lr)(int lr);
     /* Read LR register and populate gic_lr structure */
@@ -364,8 +365,12 @@ struct gic_hw_operations {
     int (*make_hwdom_madt)(const struct domain *d, u32 offset);
     /* Map extra GIC MMIO, irqs and other hw stuffs to the hardware domain. */
     int (*map_hwdom_extra_mappings)(struct domain *d);
+    /* Query the size of hardware domain madt table */
+    unsigned long (*get_hwdom_extra_madt_size)(const struct domain *d);
     /* Deny access to GIC regions */
     int (*iomem_deny_access)(const struct domain *d);
+    /* Handle LPIs, which require special handling */
+    void (*do_LPI)(unsigned int lpi);
 };
 
 void register_gic_ops(const struct gic_hw_operations *ops);
@@ -373,6 +378,7 @@ int gic_make_hwdom_dt_node(const struct domain *d,
                            const struct dt_device_node *gic,
                            void *fdt);
 int gic_make_hwdom_madt(const struct domain *d, u32 offset);
+unsigned long gic_get_hwdom_madt_size(const struct domain *d);
 int gic_map_hwdom_extra_mappings(struct domain *d);
 int gic_iomem_deny_access(const struct domain *d);
 

@@ -42,6 +42,7 @@
 #include <asm/device.h>
 #include <asm/gic.h>
 #include <asm/gic_v3_defs.h>
+#include <asm/gic_v3_its.h>
 #include <asm/cpufeature.h>
 #include <asm/acpi.h>
 
@@ -260,7 +261,7 @@ static void gicv3_enable_sre(void)
 static void gicv3_do_wait_for_rwp(void __iomem *base)
 {
     uint32_t val;
-    bool_t timeout = 0;
+    bool timeout = false;
     s_time_t deadline = NOW() + MILLISECS(1000);
 
     do {
@@ -269,7 +270,7 @@ static void gicv3_do_wait_for_rwp(void __iomem *base)
             break;
         if ( NOW() > deadline )
         {
-            timeout = 1;
+            timeout = true;
             break;
         }
         cpu_relax();
@@ -391,7 +392,16 @@ static void gicv3_restore_state(const struct vcpu *v)
         val |= GICC_SRE_EL2_ENEL1;
     WRITE_SYSREG32(val, ICC_SRE_EL2);
 
+    /*
+     * VFIQEn is RES1 if ICC_SRE_EL1.SRE is 1. This causes a Group0
+     * interrupt (as generated in GICv2 mode) to be delivered as a FIQ
+     * to the guest, with potentially consequence. So we must make sure
+     * that ICC_SRE_EL1 has been actually programmed with the value we
+     * want before starting to mess with the rest of the GIC, and
+     * VMCR_EL1 in particular.
+     */
     WRITE_SYSREG32(v->arch.gic.v3.sre_el1, ICC_SRE_EL1);
+    isb();
     WRITE_SYSREG32(v->arch.gic.v3.vmcr, ICH_VMCR_EL2);
     restore_aprn_regs(&v->arch.gic);
     gicv3_restore_lrs(v);
@@ -546,6 +556,9 @@ static void __init gicv3_dist_init(void)
     type = readl_relaxed(GICD + GICD_TYPER);
     nr_lines = 32 * ((type & GICD_TYPE_LINES) + 1);
 
+    if ( type & GICD_TYPE_LPIS )
+        gicv3_lpi_init_host_lpis(GICD_TYPE_ID_BITS(type));
+
     printk("GICv3: %d lines, (IID %8.8x).\n",
            nr_lines, readl_relaxed(GICD + GICD_IIDR));
 
@@ -564,6 +577,13 @@ static void __init gicv3_dist_init(void)
     /* Disable all global interrupts */
     for ( i = NR_GIC_LOCAL_IRQS; i < nr_lines; i += 32 )
         writel_relaxed(0xffffffff, GICD + GICD_ICENABLER + (i / 32) * 4);
+
+    /*
+     * Configure SPIs as non-secure Group-1. This will only matter
+     * if the GIC only has a single security state.
+     */
+    for ( i = NR_GIC_LOCAL_IRQS; i < nr_lines; i += 32 )
+        writel_relaxed(GENMASK(31, 0), GICD + GICD_IGROUPR + (i / 32) * 4);
 
     gicv3_dist_wait_for_rwp();
 
@@ -586,7 +606,7 @@ static void __init gicv3_dist_init(void)
 static int gicv3_enable_redist(void)
 {
     uint32_t val;
-    bool_t timeout = 0;
+    bool timeout = false;
     s_time_t deadline = NOW() + MILLISECS(1000);
 
     /* Wake up this CPU redistributor */
@@ -600,7 +620,7 @@ static int gicv3_enable_redist(void)
             break;
         if ( NOW() > deadline )
         {
-            timeout = 1;
+            timeout = true;
             break;
         }
         cpu_relax();
@@ -614,6 +634,21 @@ static int gicv3_enable_redist(void)
     }
 
     return 0;
+}
+
+/* Enable LPIs on this redistributor (only useful when the host has an ITS). */
+static bool gicv3_enable_lpis(void)
+{
+    uint32_t val;
+
+    val = readl_relaxed(GICD_RDIST_BASE + GICR_TYPER);
+    if ( !(val & GICR_TYPER_PLPIS) )
+        return false;
+
+    val = readl_relaxed(GICD_RDIST_BASE + GICR_CTLR);
+    writel_relaxed(val | GICR_CTLR_ENABLE_LPIS, GICD_RDIST_BASE + GICR_CTLR);
+
+    return true;
 }
 
 static int __init gicv3_populate_rdist(void)
@@ -658,6 +693,37 @@ static int __init gicv3_populate_rdist(void)
             if ( (typer >> 32) == aff )
             {
                 this_cpu(rbase) = ptr;
+
+                if ( typer & GICR_TYPER_PLPIS )
+                {
+                    paddr_t rdist_addr;
+                    unsigned int procnum;
+                    int ret;
+
+                    /*
+                     * The ITS refers to redistributors either by their physical
+                     * address or by their ID. Which one to use is an ITS
+                     * choice. So determine those two values here (which we
+                     * can do only here in GICv3 code) and tell the
+                     * ITS code about it, so it can use them later to be able
+                     * to address those redistributors accordingly.
+                     */
+                    rdist_addr = gicv3.rdist_regions[i].base;
+                    rdist_addr += ptr - gicv3.rdist_regions[i].map_base;
+                    procnum = (typer & GICR_TYPER_PROC_NUM_MASK);
+                    procnum >>= GICR_TYPER_PROC_NUM_SHIFT;
+
+                    gicv3_set_redist_address(rdist_addr, procnum);
+
+                    ret = gicv3_lpi_init_rdist(ptr);
+                    if ( ret && ret != -ENODEV )
+                    {
+                        printk("GICv3: CPU%d: Cannot initialize LPIs: %u\n",
+                               smp_processor_id(), ret);
+                        break;
+                    }
+                }
+
                 printk("GICv3: CPU%d: Found redistributor in region %d @%p\n",
                         smp_processor_id(), i, ptr);
                 return 0;
@@ -686,7 +752,7 @@ static int __init gicv3_populate_rdist(void)
 
 static int gicv3_cpu_init(void)
 {
-    int i;
+    int i, ret;
     uint32_t priority;
 
     /* Register ourselves with the rest of the world */
@@ -695,6 +761,16 @@ static int gicv3_cpu_init(void)
 
     if ( gicv3_enable_redist() )
         return -ENODEV;
+
+    /* If the host has any ITSes, enable LPIs now. */
+    if ( gicv3_its_host_has_its() )
+    {
+        ret = gicv3_its_setup_collection(smp_processor_id());
+        if ( ret )
+            return ret;
+        if ( !gicv3_enable_lpis() )
+            return -EBUSY;
+    }
 
     /* Set priority on PPI and SGI interrupts */
     priority = (GIC_PRI_IPI << 24 | GIC_PRI_IPI << 16 | GIC_PRI_IPI << 8 |
@@ -715,6 +791,8 @@ static int gicv3_cpu_init(void)
      */
     writel_relaxed(0xffff0000, GICD_RDIST_SGI_BASE + GICR_ICENABLER0);
     writel_relaxed(0x0000ffff, GICD_RDIST_SGI_BASE + GICR_ISENABLER0);
+    /* Configure SGIs/PPIs as non-secure Group-1 */
+    writel_relaxed(GENMASK(31, 0), GICD_RDIST_SGI_BASE + GICR_IGROUPR0);
 
     gicv3_redist_wait_for_rwp();
 
@@ -945,7 +1023,7 @@ static void gicv3_write_lr(int lr_reg, const struct gic_lr *lr)
     gicv3_ich_write_lr(lr_reg, lrv);
 }
 
-static void gicv3_hcr_status(uint32_t flag, bool_t status)
+static void gicv3_hcr_status(uint32_t flag, bool status)
 {
     uint32_t hcr;
 
@@ -1112,8 +1190,10 @@ static int gicv3_make_hwdom_dt_node(const struct domain *d,
 
     res = fdt_property(fdt, "reg", new_cells, len);
     xfree(new_cells);
+    if ( res )
+        return res;
 
-    return res;
+    return gicv3_its_make_hwdom_dt_nodes(d, gic, fdt);
 }
 
 static const hw_irq_controller gicv3_host_irq_type = {
@@ -1227,11 +1307,12 @@ static void __init gicv3_dt_init(void)
      */
     res = dt_device_get_address(node, 1 + gicv3.rdist_count,
                                 &cbase, &csize);
-    if ( res )
-        return;
+    if ( !res )
+        dt_device_get_address(node, 1 + gicv3.rdist_count + 2,
+                              &vbase, &vsize);
 
-    dt_device_get_address(node, 1 + gicv3.rdist_count + 2,
-                          &vbase, &vsize);
+    /* Check for ITS child nodes and build the host ITS list accordingly. */
+    gicv3_its_dt_init(node);
 }
 
 static int gicv3_iomem_deny_access(const struct domain *d)
@@ -1240,15 +1321,19 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     unsigned long mfn, nr;
 
     mfn = dbase >> PAGE_SHIFT;
-    nr = DIV_ROUND_UP(SZ_64K, PAGE_SIZE);
+    nr = PFN_UP(SZ_64K);
     rc = iomem_deny_access(d, mfn, mfn + nr);
+    if ( rc )
+        return rc;
+
+    rc = gicv3_its_deny_access(d);
     if ( rc )
         return rc;
 
     for ( i = 0; i < gicv3.rdist_count; i++ )
     {
         mfn = gicv3.rdist_regions[i].base >> PAGE_SHIFT;
-        nr = DIV_ROUND_UP(gicv3.rdist_regions[i].size, PAGE_SIZE);
+        nr = PFN_UP(gicv3.rdist_regions[i].size);
         rc = iomem_deny_access(d, mfn, mfn + nr);
         if ( rc )
             return rc;
@@ -1257,7 +1342,7 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     if ( cbase != INVALID_PADDR )
     {
         mfn = cbase >> PAGE_SHIFT;
-        nr = DIV_ROUND_UP(csize, PAGE_SIZE);
+        nr = PFN_UP(csize);
         rc = iomem_deny_access(d, mfn, mfn + nr);
         if ( rc )
             return rc;
@@ -1266,7 +1351,7 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     if ( vbase != INVALID_PADDR )
     {
         mfn = vbase >> PAGE_SHIFT;
-        nr = DIV_ROUND_UP(csize, PAGE_SIZE);
+        nr = PFN_UP(csize);
         return iomem_deny_access(d, mfn, mfn + nr);
     }
 
@@ -1311,7 +1396,7 @@ static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
     for ( i = 0; i < d->max_vcpus; i++ )
     {
         gicc = (struct acpi_madt_generic_interrupt *)(base_ptr + table_len);
-        ACPI_MEMCPY(gicc, host_gicc, size);
+        memcpy(gicc, host_gicc, size);
         gicc->cpu_interface_number = i;
         gicc->uid = i;
         gicc->flags = ACPI_MADT_ENABLED;
@@ -1337,7 +1422,22 @@ static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
         table_len += size;
     }
 
+    table_len += gicv3_its_make_hwdom_madt(d, base_ptr + table_len);
+
     return table_len;
+}
+
+static unsigned long gicv3_get_hwdom_extra_madt_size(const struct domain *d)
+{
+    unsigned long size;
+
+    size = sizeof(struct acpi_madt_generic_redistributor)
+           * d->arch.vgic.nr_regions;
+
+    size += sizeof(struct acpi_madt_generic_translator)
+            * vgic_v3_its_count(d);
+
+    return size;
 }
 
 static int __init
@@ -1504,6 +1604,8 @@ static void __init gicv3_acpi_init(void)
 
     gicv3.rdist_stride = 0;
 
+    gicv3_its_acpi_init();
+
     /*
      * In ACPI, 0 is considered as the invalid address. However the rest
      * of the initialization rely on the invalid address to be
@@ -1529,6 +1631,11 @@ static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
 {
     return 0;
 }
+
+static unsigned long gicv3_get_hwdom_extra_madt_size(const struct domain *d)
+{
+    return 0;
+}
 #endif
 
 /* Set up the GIC */
@@ -1536,6 +1643,7 @@ static int __init gicv3_init(void)
 {
     int res, i;
     uint32_t reg;
+    unsigned int intid_bits;
 
     if ( !cpu_has_gicv3 )
     {
@@ -1579,8 +1687,11 @@ static int __init gicv3_init(void)
                i, r->base, r->base + r->size);
     }
 
+    reg = readl_relaxed(GICD + GICD_TYPER);
+    intid_bits = GICD_TYPE_ID_BITS(reg);
+
     vgic_v3_setup_hw(dbase, gicv3.rdist_count, gicv3.rdist_regions,
-                     gicv3.rdist_stride);
+                     gicv3.rdist_stride, intid_bits);
     gicv3_init_v2();
 
     spin_lock_init(&gicv3.lock);
@@ -1588,6 +1699,11 @@ static int __init gicv3_init(void)
     spin_lock(&gicv3.lock);
 
     gicv3_dist_init();
+
+    res = gicv3_its_init();
+    if ( res )
+        panic("GICv3: ITS: initialization failed: %d\n", res);
+
     res = gicv3_cpu_init();
     gicv3_hyp_init();
 
@@ -1621,7 +1737,9 @@ static const struct gic_hw_operations gicv3_ops = {
     .secondary_init      = gicv3_secondary_cpu_init,
     .make_hwdom_dt_node  = gicv3_make_hwdom_dt_node,
     .make_hwdom_madt     = gicv3_make_hwdom_madt,
+    .get_hwdom_extra_madt_size = gicv3_get_hwdom_extra_madt_size,
     .iomem_deny_access   = gicv3_iomem_deny_access,
+    .do_LPI              = gicv3_do_LPI,
 };
 
 static int __init gicv3_dt_preinit(struct dt_device_node *node, const void *data)

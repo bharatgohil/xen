@@ -30,9 +30,9 @@ static const char *handler[]= {
         "Error"
 };
 
-asmlinkage void do_bad_mode(struct cpu_user_regs *regs, int reason)
+void do_bad_mode(struct cpu_user_regs *regs, int reason)
 {
-    union hsr hsr = { .bits = READ_SYSREG32(ESR_EL2) };
+    union hsr hsr = { .bits = regs->hsr };
 
     printk("Bad mode in %s handler detected\n", handler[reason]);
     printk("ESR=0x%08"PRIx32":  EC=%"PRIx32", IL=%"PRIx32", ISS=%"PRIx32"\n",

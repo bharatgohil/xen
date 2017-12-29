@@ -26,10 +26,10 @@
 #include <asm/mach-generic/mach_apic.h>
 #include <public/physdev.h>
 
-static void parse_irq_vector_map_param(char *s);
+static int parse_irq_vector_map_param(const char *s);
 
 /* opt_noirqbalance: If true, software IRQ balancing/affinity is disabled. */
-bool_t __read_mostly opt_noirqbalance = 0;
+bool __read_mostly opt_noirqbalance;
 boolean_param("noirqbalance", opt_noirqbalance);
 
 unsigned int __read_mostly nr_irqs_gsi = 16;
@@ -60,24 +60,29 @@ static struct timer irq_ratelimit_timer;
 static unsigned int __read_mostly irq_ratelimit_threshold = 10000;
 integer_param("irq_ratelimit", irq_ratelimit_threshold);
 
-static void __init parse_irq_vector_map_param(char *s)
+static int __init parse_irq_vector_map_param(const char *s)
 {
-    char *ss;
+    const char *ss;
+    int rc = 0;
 
     do {
         ss = strchr(s, ',');
-        if ( ss )
-            *ss = '\0';
+        if ( !ss )
+            ss = strchr(s, '\0');
 
-        if ( !strcmp(s, "none"))
+        if ( !strncmp(s, "none", ss - s))
             opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_NONE;
-        else if ( !strcmp(s, "global"))
+        else if ( !strncmp(s, "global", ss - s))
             opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_GLOBAL;
-        else if ( !strcmp(s, "per-device"))
+        else if ( !strncmp(s, "per-device", ss - s))
             opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_PERDEV;
+        else
+            rc = -EINVAL;
 
         s = ss + 1;
-    } while ( ss );
+    } while ( *ss );
+
+    return rc;
 }
 
 /* Must be called when irq disabled */
@@ -350,7 +355,7 @@ int __init init_irq_data(void)
     struct irq_desc *desc;
     int irq, vector;
 
-    for (vector = 0; vector < NR_VECTORS; ++vector)
+    for ( vector = 0; vector < NR_VECTORS; ++vector )
         this_cpu(vector_irq)[vector] = INT_MIN;
 
     irq_desc = xzalloc_array(struct irq_desc, nr_irqs);
@@ -358,17 +363,20 @@ int __init init_irq_data(void)
     if ( !irq_desc )
         return -ENOMEM;
 
-    for (irq = 0; irq < nr_irqs_gsi; irq++) {
+    for ( irq = 0; irq < nr_irqs_gsi; irq++ )
+    {
         desc = irq_to_desc(irq);
         desc->irq = irq;
         init_one_irq_desc(desc);
     }
-    for (; irq < nr_irqs; irq++)
+    for ( ; irq < nr_irqs; irq++ )
         irq_to_desc(irq)->irq = irq;
 
+#ifdef CONFIG_PV
     /* Never allocate the hypercall vector or Linux/BSD fast-trap vector. */
     set_bit(LEGACY_SYSCALL_VECTOR, used_vectors);
     set_bit(HYPERCALL_VECTOR, used_vectors);
+#endif
     
     /* IRQ_MOVE_CLEANUP_VECTOR used for clean up vectors */
     set_bit(IRQ_MOVE_CLEANUP_VECTOR, used_vectors);
@@ -1067,9 +1075,9 @@ struct pending_eoi {
 static DEFINE_PER_CPU(struct pending_eoi, pending_eoi[NR_DYNAMIC_VECTORS]);
 #define pending_eoi_sp(p) ((p)[NR_DYNAMIC_VECTORS-1].vector)
 
-bool_t cpu_has_pending_apic_eoi(void)
+bool cpu_has_pending_apic_eoi(void)
 {
-    return (pending_eoi_sp(this_cpu(pending_eoi)) != 0);
+    return pending_eoi_sp(this_cpu(pending_eoi)) != 0;
 }
 
 static inline void set_pirq_eoi(struct domain *d, unsigned int irq)
@@ -1180,7 +1188,7 @@ static void __do_IRQ_guest(int irq)
         if ( (action->ack_type != ACKTYPE_NONE) &&
              !test_and_set_bool(pirq->masked) )
             action->in_flight++;
-        if ( !hvm_do_IRQ_dpci(d, pirq) )
+        if ( !is_hvm_domain(d) || !hvm_do_IRQ_dpci(d, pirq) )
             send_guest_pirq(d, pirq);
     }
 
@@ -1251,7 +1259,8 @@ static int prepare_domain_irq_pirq(struct domain *d, int irq, int pirq,
         return -ENOMEM;
     }
     *pinfo = info;
-    return 0;
+
+    return !!err;
 }
 
 static void set_domain_irq_pirq(struct domain *d, int irq, struct pirq *pirq)
@@ -1294,7 +1303,10 @@ int init_domain_irq_mapping(struct domain *d)
             continue;
         err = prepare_domain_irq_pirq(d, i, i, &info);
         if ( err )
+        {
+            ASSERT(err < 0);
             break;
+        }
         set_domain_irq_pirq(d, i, info);
     }
 
@@ -1486,7 +1498,7 @@ int pirq_guest_unmask(struct domain *d)
         {
             pirq = pirqs[i]->pirq;
             if ( pirqs[i]->masked &&
-                 !evtchn_port_is_masked(d, evtchn_from_port(d, pirqs[i]->evtchn)) )
+                 !evtchn_port_is_masked(d, pirqs[i]->evtchn) )
                 pirq_guest_eoi(pirqs[i]);
         }
     } while ( ++pirq < d->nr_pirqs && n == ARRAY_SIZE(pirqs) );
@@ -1799,11 +1811,12 @@ void pirq_guest_unbind(struct domain *d, struct pirq *pirq)
         cleanup_domain_irq_pirq(d, irq, pirq);
 }
 
-static int pirq_guest_force_unbind(struct domain *d, struct pirq *pirq)
+static bool pirq_guest_force_unbind(struct domain *d, struct pirq *pirq)
 {
     struct irq_desc *desc;
     irq_guest_action_t *action, *oldaction = NULL;
-    int i, bound = 0;
+    unsigned int i;
+    bool bound = false;
 
     WARN_ON(!spin_is_locked(&d->event_lock));
 
@@ -1827,7 +1840,7 @@ static int pirq_guest_force_unbind(struct domain *d, struct pirq *pirq)
     if ( i == action->nr_guests )
         goto out;
 
-    bound = 1;
+    bound = true;
     oldaction = __pirq_guest_unbind(d, pirq, desc);
 
  out:
@@ -1843,8 +1856,8 @@ static int pirq_guest_force_unbind(struct domain *d, struct pirq *pirq)
     return bound;
 }
 
-static inline bool_t is_free_pirq(const struct domain *d,
-                                  const struct pirq *pirq)
+static inline bool is_free_pirq(const struct domain *d,
+                                const struct pirq *pirq)
 {
     return !pirq || (!pirq->arch.irq && (!is_hvm_domain(d) ||
         pirq->arch.hvm.emuirq == IRQ_UNBOUND));
@@ -1894,6 +1907,8 @@ int get_free_pirqs(struct domain *d, unsigned int nr)
     return -ENOSPC;
 }
 
+#define MAX_MSI_IRQS 32 /* limited by MSI capability struct properties */
+
 int map_domain_pirq(
     struct domain *d, int pirq, int irq, int type, void *data)
 {
@@ -1902,6 +1917,7 @@ int map_domain_pirq(
     struct pirq *info;
     struct irq_desc *desc;
     unsigned long flags;
+    DECLARE_BITMAP(prepared, MAX_MSI_IRQS) = {};
 
     ASSERT(spin_is_locked(&d->event_lock));
 
@@ -1945,8 +1961,10 @@ int map_domain_pirq(
     }
 
     ret = prepare_domain_irq_pirq(d, irq, pirq, &info);
-    if ( ret )
+    if ( ret < 0 )
         goto revoke;
+    if ( !ret )
+        __set_bit(0, prepared);
 
     desc = irq_to_desc(irq);
 
@@ -1963,7 +1981,10 @@ int map_domain_pirq(
         if ( !cpu_has_apic )
             goto done;
 
-        pdev = pci_get_pdev(msi->seg, msi->bus, msi->devfn);
+        pdev = pci_get_pdev_by_domain(d, msi->seg, msi->bus, msi->devfn);
+        if ( !pdev )
+            goto done;
+
         ret = pci_enable_msi(msi, &msi_desc);
         if ( ret )
         {
@@ -2015,8 +2036,10 @@ int map_domain_pirq(
             irq = create_irq(NUMA_NO_NODE);
             ret = irq >= 0 ? prepare_domain_irq_pirq(d, irq, pirq + nr, &info)
                            : irq;
-            if ( ret )
+            if ( ret < 0 )
                 break;
+            if ( !ret )
+                __set_bit(nr, prepared);
             msi_desc[nr].irq = irq;
 
             if ( irq_permit_access(d, irq) != 0 )
@@ -2049,15 +2072,15 @@ int map_domain_pirq(
                 desc->msi_desc = NULL;
                 spin_unlock_irqrestore(&desc->lock, flags);
             }
-            while ( nr-- )
+            while ( nr )
             {
                 if ( irq >= 0 && irq_deny_access(d, irq) )
                     printk(XENLOG_G_ERR
                            "dom%d: could not revoke access to IRQ%d (pirq %d)\n",
                            d->domain_id, irq, pirq);
-                if ( info )
+                if ( info && test_bit(nr, prepared) )
                     cleanup_domain_irq_pirq(d, irq, info);
-                info = pirq_info(d, pirq + nr);
+                info = pirq_info(d, pirq + --nr);
                 irq = info->arch.irq;
             }
             msi_desc->irq = -1;
@@ -2073,12 +2096,14 @@ int map_domain_pirq(
         spin_lock_irqsave(&desc->lock, flags);
         set_domain_irq_pirq(d, irq, info);
         spin_unlock_irqrestore(&desc->lock, flags);
+        ret = 0;
     }
 
 done:
     if ( ret )
     {
-        cleanup_domain_irq_pirq(d, irq, info);
+        if ( test_bit(0, prepared) )
+            cleanup_domain_irq_pirq(d, irq, info);
  revoke:
         if ( irq_deny_access(d, irq) )
             printk(XENLOG_G_ERR
@@ -2095,7 +2120,7 @@ int unmap_domain_pirq(struct domain *d, int pirq)
     struct irq_desc *desc;
     int irq, ret = 0, rc;
     unsigned int i, nr = 1;
-    bool_t forced_unbind;
+    bool forced_unbind;
     struct pirq *info;
     struct msi_desc *msi_desc = NULL;
 
@@ -2129,7 +2154,8 @@ int unmap_domain_pirq(struct domain *d, int pirq)
         nr = msi_desc->msi.nvec;
     }
 
-    ret = xsm_unmap_domain_irq(XSM_HOOK, d, irq, msi_desc);
+    ret = xsm_unmap_domain_irq(XSM_HOOK, d, irq,
+                               msi_desc ? msi_desc->dev : NULL);
     if ( ret )
         goto done;
 
@@ -2244,7 +2270,6 @@ static void dump_irqs(unsigned char key)
     int i, irq, pirq;
     struct irq_desc *desc;
     irq_guest_action_t *action;
-    struct evtchn *evtchn;
     struct domain *d;
     const struct pirq *info;
     unsigned long flags;
@@ -2287,11 +2312,10 @@ static void dump_irqs(unsigned char key)
                 d = action->guest[i];
                 pirq = domain_irq_to_pirq(d, irq);
                 info = pirq_info(d, pirq);
-                evtchn = evtchn_from_port(d, info->evtchn);
                 printk("%u:%3d(%c%c%c)",
                        d->domain_id, pirq,
-                       (evtchn_port_is_pending(d, evtchn) ? 'P' : '-'),
-                       (evtchn_port_is_masked(d, evtchn) ? 'M' : '-'),
+                       evtchn_port_is_pending(d, info->evtchn) ? 'P' : '-',
+                       evtchn_port_is_masked(d, info->evtchn) ? 'M' : '-',
                        (info->masked ? 'M' : '-'));
                 if ( i != action->nr_guests )
                     printk(",");
@@ -2326,7 +2350,7 @@ static int __init setup_dump_irqs(void)
 __initcall(setup_dump_irqs);
 
 /* Reset irq affinities to match the given CPU mask. */
-void fixup_irqs(const cpumask_t *mask, bool_t verbose)
+void fixup_irqs(const cpumask_t *mask, bool verbose)
 {
     unsigned int irq;
     static int warned;
@@ -2334,7 +2358,7 @@ void fixup_irqs(const cpumask_t *mask, bool_t verbose)
 
     for ( irq = 0; irq < nr_irqs; irq++ )
     {
-        bool_t break_affinity = 0, set_affinity = 1;
+        bool break_affinity = false, set_affinity = true;
         unsigned int vector;
         cpumask_t affinity;
 
@@ -2362,7 +2386,7 @@ void fixup_irqs(const cpumask_t *mask, bool_t verbose)
         cpumask_and(&affinity, &affinity, mask);
         if ( cpumask_empty(&affinity) )
         {
-            break_affinity = 1;
+            break_affinity = true;
             cpumask_copy(&affinity, mask);
         }
 
@@ -2372,7 +2396,7 @@ void fixup_irqs(const cpumask_t *mask, bool_t verbose)
         if ( desc->handler->set_affinity )
             desc->handler->set_affinity(desc, &affinity);
         else if ( !(warned++) )
-            set_affinity = 0;
+            set_affinity = false;
 
         if ( desc->handler->enable )
             desc->handler->enable(desc);
@@ -2532,8 +2556,170 @@ void arch_evtchn_bind_pirq(struct domain *d, int pirq)
     spin_unlock_irqrestore(&desc->lock, flags);
 }
 
-bool_t hvm_domain_use_pirq(const struct domain *d, const struct pirq *pirq)
+bool hvm_domain_use_pirq(const struct domain *d, const struct pirq *pirq)
 {
-    return is_hvm_domain(d) && pirq &&
-           pirq->arch.hvm.emuirq != IRQ_UNBOUND; 
+    return is_hvm_domain(d) && pirq && pirq->arch.hvm.emuirq != IRQ_UNBOUND;
+}
+
+static int allocate_pirq(struct domain *d, int index, int pirq, int irq,
+                         int type, int *nr)
+{
+    int current_pirq;
+
+    ASSERT(spin_is_locked(&d->event_lock));
+    current_pirq = domain_irq_to_pirq(d, irq);
+    if ( pirq < 0 )
+    {
+        if ( current_pirq )
+        {
+            dprintk(XENLOG_G_ERR, "dom%d: %d:%d already mapped to %d\n",
+                    d->domain_id, index, pirq, current_pirq);
+            if ( current_pirq < 0 )
+                return -EBUSY;
+        }
+        else if ( type == MAP_PIRQ_TYPE_MULTI_MSI )
+        {
+            if ( *nr <= 0 || *nr > MAX_MSI_IRQS )
+                return -EDOM;
+            if ( *nr != 1 && !iommu_intremap )
+                return -EOPNOTSUPP;
+
+            while ( *nr & (*nr - 1) )
+                *nr += *nr & -*nr;
+            pirq = get_free_pirqs(d, *nr);
+            if ( pirq < 0 )
+            {
+                while ( (*nr >>= 1) > 1 )
+                    if ( get_free_pirqs(d, *nr) > 0 )
+                        break;
+                dprintk(XENLOG_G_ERR, "dom%d: no block of %d free pirqs\n",
+                        d->domain_id, *nr << 1);
+            }
+        }
+        else
+        {
+            pirq = get_free_pirq(d, type);
+            if ( pirq < 0 )
+                dprintk(XENLOG_G_ERR, "dom%d: no free pirq\n", d->domain_id);
+        }
+    }
+    else if ( current_pirq && pirq != current_pirq )
+    {
+        dprintk(XENLOG_G_ERR, "dom%d: irq %d already mapped to pirq %d\n",
+                d->domain_id, irq, current_pirq);
+        return -EEXIST;
+    }
+
+    return pirq;
+}
+
+int allocate_and_map_gsi_pirq(struct domain *d, int index, int *pirq_p)
+{
+    int irq, pirq, ret;
+
+    if ( index < 0 || index >= nr_irqs_gsi )
+    {
+        dprintk(XENLOG_G_ERR, "dom%d: map invalid irq %d\n", d->domain_id,
+                index);
+        return -EINVAL;
+    }
+
+    irq = domain_pirq_to_irq(current->domain, index);
+    if ( irq <= 0 )
+    {
+        if ( is_hardware_domain(current->domain) )
+            irq = index;
+        else
+        {
+            dprintk(XENLOG_G_ERR, "dom%d: map pirq with incorrect irq!\n",
+                    d->domain_id);
+            return -EINVAL;
+        }
+    }
+
+    /* Verify or get pirq. */
+    spin_lock(&d->event_lock);
+    pirq = allocate_pirq(d, index, *pirq_p, irq, MAP_PIRQ_TYPE_GSI, NULL);
+    if ( pirq < 0 )
+    {
+        ret = pirq;
+        goto done;
+    }
+
+    ret = map_domain_pirq(d, pirq, irq, MAP_PIRQ_TYPE_GSI, NULL);
+    if ( !ret )
+        *pirq_p = pirq;
+
+ done:
+    spin_unlock(&d->event_lock);
+
+    return ret;
+}
+
+int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
+                              int type, struct msi_info *msi)
+{
+    int irq, pirq, ret;
+
+    switch ( type )
+    {
+    case MAP_PIRQ_TYPE_MSI:
+        if ( !msi->table_base )
+            msi->entry_nr = 1;
+        irq = index;
+        if ( irq == -1 )
+        {
+    case MAP_PIRQ_TYPE_MULTI_MSI:
+            irq = create_irq(NUMA_NO_NODE);
+        }
+
+        if ( irq < nr_irqs_gsi || irq >= nr_irqs )
+        {
+            dprintk(XENLOG_G_ERR, "dom%d: can't create irq for msi!\n",
+                    d->domain_id);
+            return -EINVAL;
+        }
+
+        msi->irq = irq;
+        break;
+
+    default:
+        dprintk(XENLOG_G_ERR, "dom%d: wrong pirq type %x\n",
+                d->domain_id, type);
+        ASSERT_UNREACHABLE();
+        return -EINVAL;
+    }
+
+    msi->irq = irq;
+
+    pcidevs_lock();
+    /* Verify or get pirq. */
+    spin_lock(&d->event_lock);
+    pirq = allocate_pirq(d, index, *pirq_p, irq, type, &msi->entry_nr);
+    if ( pirq < 0 )
+    {
+        ret = pirq;
+        goto done;
+    }
+
+    ret = map_domain_pirq(d, pirq, irq, type, msi);
+    if ( !ret )
+        *pirq_p = pirq;
+
+ done:
+    spin_unlock(&d->event_lock);
+    pcidevs_unlock();
+    if ( ret )
+    {
+        switch ( type )
+        {
+        case MAP_PIRQ_TYPE_MSI:
+            if ( index == -1 )
+        case MAP_PIRQ_TYPE_MULTI_MSI:
+                destroy_irq(irq);
+            break;
+        }
+    }
+
+    return ret;
 }

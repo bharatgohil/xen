@@ -61,15 +61,15 @@
  *
  * All memory which is shared with other entities in the system
  * (including the hypervisor and other guests) must reside in memory
- * which is mapped as Normal Inner-cacheable. This applies to:
+ * which is mapped as Normal Inner Write-Back Outer Write-Back Inner-Shareable.
+ * This applies to:
  *  - hypercall arguments passed via a pointer to guest memory.
  *  - memory shared via the grant table mechanism (including PV I/O
  *    rings etc).
  *  - memory shared with the hypervisor (struct shared_info, struct
  *    vcpu_info, the grant table, etc).
  *
- * Any Inner cache allocation strategy (Write-Back, Write-Through etc)
- * is acceptable. There is no restriction on the Outer-cacheability.
+ * Any cache allocation hints are acceptable.
  */
 
 /*
@@ -274,6 +274,7 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_guest_core_regs_t);
 
 typedef uint64_t xen_pfn_t;
 #define PRI_xen_pfn PRIx64
+#define PRIu_xen_pfn PRIu64
 
 /* Maximum number of virtual CPUs in legacy multi-processor guests. */
 /* Only one. All other VCPUS must use VCPUOP_register_vcpu_info */
@@ -410,6 +411,10 @@ typedef uint64_t xen_callback_t;
 #define GUEST_ACPI_BASE 0x20000000ULL
 #define GUEST_ACPI_SIZE 0x02000000ULL
 
+/* PL011 mappings */
+#define GUEST_PL011_BASE    0x22000000ULL
+#define GUEST_PL011_SIZE    0x00001000ULL
+
 /*
  * 16MB == 4096 pages reserved for guest to use as a region to map its
  * grant table in.
@@ -443,6 +448,8 @@ typedef uint64_t xen_callback_t;
 #define GUEST_TIMER_PHYS_S_PPI  29
 #define GUEST_TIMER_PHYS_NS_PPI 30
 #define GUEST_EVTCHN_PPI        31
+
+#define GUEST_VPL011_SPI        32
 
 /* PSCI functions */
 #define PSCI_cpu_suspend 0

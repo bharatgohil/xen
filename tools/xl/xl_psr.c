@@ -25,7 +25,6 @@
 #include "xl_utils.h"
 #include "xl_parse.h"
 
-#ifdef LIBXL_HAVE_PSR_CMT
 static int psr_cmt_hwinfo(void)
 {
     int rc;
@@ -292,23 +291,19 @@ int main_psr_cmt_show(int argc, char **argv)
 
     return ret;
 }
-#endif
 
-#ifdef LIBXL_HAVE_PSR_CAT
-static int psr_cat_hwinfo(void)
+static int psr_l3_cat_hwinfo(void)
 {
     int rc;
-    int i, nr;
+    unsigned int i, nr;
     uint32_t l3_cache_size;
     libxl_psr_cat_info *info;
 
-    printf("Cache Allocation Technology (CAT):\n");
-
-    rc = libxl_psr_cat_get_l3_info(ctx, &info, &nr);
-    if (rc) {
-        fprintf(stderr, "Failed to get cat info\n");
+    rc = libxl_psr_cat_get_info(ctx, &info, &nr, 3);
+    if (rc)
         return rc;
-    }
+
+    printf("Cache Allocation Technology (CAT):\n");
 
     for (i = 0; i < nr; i++) {
         rc = libxl_psr_cmt_get_l3_cache_size(ctx, info[i].id, &l3_cache_size);
@@ -344,7 +339,7 @@ static void psr_cat_print_one_domain_cbm_type(uint32_t domid, uint32_t socketid,
 }
 
 static void psr_cat_print_one_domain_cbm(uint32_t domid, uint32_t socketid,
-                                         bool cdp_enabled)
+                                         bool cdp_enabled, unsigned int lvl)
 {
     char *domain_name;
 
@@ -352,27 +347,38 @@ static void psr_cat_print_one_domain_cbm(uint32_t domid, uint32_t socketid,
     printf("%5d%25s", domid, domain_name);
     free(domain_name);
 
-    if (!cdp_enabled) {
+    switch (lvl) {
+    case 3:
+        if (!cdp_enabled) {
+            psr_cat_print_one_domain_cbm_type(domid, socketid,
+                                              LIBXL_PSR_CBM_TYPE_L3_CBM);
+        } else {
+            psr_cat_print_one_domain_cbm_type(domid, socketid,
+                                              LIBXL_PSR_CBM_TYPE_L3_CBM_CODE);
+            psr_cat_print_one_domain_cbm_type(domid, socketid,
+                                              LIBXL_PSR_CBM_TYPE_L3_CBM_DATA);
+        }
+        break;
+    case 2:
         psr_cat_print_one_domain_cbm_type(domid, socketid,
-                                          LIBXL_PSR_CBM_TYPE_L3_CBM);
-    } else {
-        psr_cat_print_one_domain_cbm_type(domid, socketid,
-                                          LIBXL_PSR_CBM_TYPE_L3_CBM_CODE);
-        psr_cat_print_one_domain_cbm_type(domid, socketid,
-                                          LIBXL_PSR_CBM_TYPE_L3_CBM_DATA);
+                                          LIBXL_PSR_CBM_TYPE_L2_CBM);
+        break;
+    default:
+        printf("Input lvl %d is wrong!", lvl);
+        break;
     }
 
     printf("\n");
 }
 
 static int psr_cat_print_domain_cbm(uint32_t domid, uint32_t socketid,
-                                    bool cdp_enabled)
+                                    bool cdp_enabled, unsigned int lvl)
 {
     int i, nr_domains;
     libxl_dominfo *list;
 
     if (domid != INVALID_DOMID) {
-        psr_cat_print_one_domain_cbm(domid, socketid, cdp_enabled);
+        psr_cat_print_one_domain_cbm(domid, socketid, cdp_enabled, lvl);
         return 0;
     }
 
@@ -382,54 +388,89 @@ static int psr_cat_print_domain_cbm(uint32_t domid, uint32_t socketid,
     }
 
     for (i = 0; i < nr_domains; i++)
-        psr_cat_print_one_domain_cbm(list[i].domid, socketid, cdp_enabled);
+        psr_cat_print_one_domain_cbm(list[i].domid, socketid, cdp_enabled, lvl);
     libxl_dominfo_list_free(list, nr_domains);
 
     return 0;
 }
 
-static int psr_cat_print_socket(uint32_t domid, libxl_psr_cat_info *info)
+static int psr_cat_print_socket(uint32_t domid, libxl_psr_cat_info *info,
+                                unsigned int lvl)
 {
     int rc;
     uint32_t l3_cache_size;
 
-    rc = libxl_psr_cmt_get_l3_cache_size(ctx, info->id, &l3_cache_size);
-    if (rc) {
-        fprintf(stderr, "Failed to get l3 cache size for socket:%d\n",
-                info->id);
-        return -1;
+    printf("%-16s: %u\n", "Socket ID", info->id);
+
+    /* So far, CMT only supports L3 cache. */
+    if (lvl == 3) {
+        rc = libxl_psr_cmt_get_l3_cache_size(ctx, info->id, &l3_cache_size);
+        if (rc) {
+            fprintf(stderr, "Failed to get l3 cache size for socket:%d\n",
+                    info->id);
+            return -1;
+        }
+        printf("%-16s: %uKB\n", "L3 Cache", l3_cache_size);
     }
 
-    printf("%-16s: %u\n", "Socket ID", info->id);
-    printf("%-16s: %uKB\n", "L3 Cache", l3_cache_size);
     printf("%-16s: %#llx\n", "Default CBM", (1ull << info->cbm_len) - 1);
     if (info->cdp_enabled)
         printf("%5s%25s%16s%16s\n", "ID", "NAME", "CBM (code)", "CBM (data)");
     else
         printf("%5s%25s%16s\n", "ID", "NAME", "CBM");
 
-    return psr_cat_print_domain_cbm(domid, info->id, info->cdp_enabled);
+    return psr_cat_print_domain_cbm(domid, info->id, info->cdp_enabled, lvl);
 }
 
-static int psr_cat_show(uint32_t domid)
+static int psr_cat_show(uint32_t domid, unsigned int lvl)
 {
-    int i, nr;
+    unsigned int i, nr;
     int rc;
     libxl_psr_cat_info *info;
 
-    rc = libxl_psr_cat_get_l3_info(ctx, &info, &nr);
+    if (lvl != 2 && lvl != 3) {
+        fprintf(stderr, "Input lvl %d is wrong\n", lvl);
+        return EXIT_FAILURE;
+    }
+
+    rc = libxl_psr_cat_get_info(ctx, &info, &nr, lvl);
     if (rc) {
-        fprintf(stderr, "Failed to get cat info\n");
+        fprintf(stderr, "Failed to get %s cat info\n", (lvl == 3)?"L3":"L2");
         return rc;
     }
 
     for (i = 0; i < nr; i++) {
-        rc = psr_cat_print_socket(domid, info + i);
+        rc = psr_cat_print_socket(domid, info + i, lvl);
         if (rc)
             goto out;
     }
 
 out:
+    libxl_psr_cat_info_list_free(info, nr);
+    return rc;
+}
+
+static int psr_l2_cat_hwinfo(void)
+{
+    int rc;
+    unsigned int i, nr;
+    libxl_psr_cat_info *info;
+
+    rc = libxl_psr_cat_get_info(ctx, &info, &nr, 2);
+    if (rc)
+        return rc;
+
+    printf("Cache Allocation Technology (CAT): L2\n");
+
+    for (i = 0; i < nr; i++) {
+        /* There is no CMT on L2 cache so far. */
+        printf("%-16s: %u\n", "Socket ID", info[i].id);
+        printf("%-16s: %u\n", "Maximum COS", info[i].cos_max);
+        printf("%-16s: %u\n", "CBM length", info[i].cbm_len);
+        printf("%-16s: %#llx\n", "Default CBM",
+               (1ull << info[i].cbm_len) - 1);
+    }
+
     libxl_psr_cat_info_list_free(info, nr);
     return rc;
 }
@@ -445,19 +486,21 @@ int main_psr_cat_cbm_set(int argc, char **argv)
     char *value;
     libxl_string_list socket_list;
     unsigned long start, end;
-    int i, j, len;
+    unsigned int i, j, len;
+    unsigned int lvl = 3;
 
     static struct option opts[] = {
         {"socket", 1, 0, 's'},
         {"data", 0, 0, 'd'},
         {"code", 0, 0, 'c'},
+        {"level", 1, 0, 'l'},
         COMMON_LONG_OPTS
     };
 
     libxl_socket_bitmap_alloc(ctx, &target_map, 0);
     libxl_bitmap_set_none(&target_map);
 
-    SWITCH_FOREACH_OPT(opt, "s:cd", opts, "psr-cat-cbm-set", 2) {
+    SWITCH_FOREACH_OPT(opt, "s:l:cd", opts, "psr-cat-set", 2) {
     case 's':
         trim(isspace, optarg, &value);
         split_string_into_string_list(value, ",", &socket_list);
@@ -477,24 +520,35 @@ int main_psr_cat_cbm_set(int argc, char **argv)
     case 'c':
         opt_code = 1;
         break;
+    case 'l':
+        lvl = atoi(optarg);
+        break;
     }
 
-    if (opt_data && opt_code) {
-        fprintf(stderr, "Cannot handle -c and -d at the same time\n");
-        return -1;
-    } else if (opt_data) {
-        type = LIBXL_PSR_CBM_TYPE_L3_CBM_DATA;
-    } else if (opt_code) {
-        type = LIBXL_PSR_CBM_TYPE_L3_CBM_CODE;
+    if (lvl == 2)
+        type = LIBXL_PSR_CBM_TYPE_L2_CBM;
+    else if (lvl == 3) {
+        if (opt_data && opt_code) {
+            fprintf(stderr, "Cannot handle -c and -d at the same time\n");
+            return EXIT_FAILURE;
+        } else if (opt_data) {
+            type = LIBXL_PSR_CBM_TYPE_L3_CBM_DATA;
+        } else if (opt_code) {
+            type = LIBXL_PSR_CBM_TYPE_L3_CBM_CODE;
+        } else {
+            type = LIBXL_PSR_CBM_TYPE_L3_CBM;
+        }
     } else {
         type = LIBXL_PSR_CBM_TYPE_L3_CBM;
+        fprintf(stderr, "Input lvl %d is wrong\n", lvl);
+        return EXIT_FAILURE;
     }
 
     if (libxl_bitmap_is_empty(&target_map))
         libxl_bitmap_set_any(&target_map);
 
     if (argc != optind + 2) {
-        help("psr-cat-cbm-set");
+        help("psr-cat-set");
         return 2;
     }
 
@@ -509,11 +563,19 @@ int main_psr_cat_cbm_set(int argc, char **argv)
 
 int main_psr_cat_show(int argc, char **argv)
 {
-    int opt;
+    int opt = 0;
     uint32_t domid;
+    unsigned int lvl = 3;
 
-    SWITCH_FOREACH_OPT(opt, "", NULL, "psr-cat-show", 0) {
-        /* No options */
+    static struct option opts[] = {
+        {"level", 1, 0, 'l'},
+        COMMON_LONG_OPTS
+    };
+
+    SWITCH_FOREACH_OPT(opt, "l:", opts, "psr-cat-show", 0) {
+    case 'l':
+        lvl = atoi(optarg);
+        break;
     }
 
     if (optind >= argc)
@@ -525,7 +587,7 @@ int main_psr_cat_show(int argc, char **argv)
         return 2;
     }
 
-    return psr_cat_show(domid);
+    return psr_cat_show(domid, lvl);
 }
 
 int main_psr_hwinfo(int argc, char **argv)
@@ -551,12 +613,14 @@ int main_psr_hwinfo(int argc, char **argv)
         ret = psr_cmt_hwinfo();
 
     if (!ret && (all || cat))
-        ret = psr_cat_hwinfo();
+        ret = psr_l3_cat_hwinfo();
+
+    /* L2 CAT is independent of CMT and L3 CAT */
+    if (all || cat)
+        ret = psr_l2_cat_hwinfo();
 
     return ret;
 }
-
-#endif
 
 /*
  * Local variables:

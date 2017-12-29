@@ -53,6 +53,7 @@ static struct kexec_image *kexec_image[KEXEC_IMAGE_NR];
 #define KEXEC_FLAG_DEFAULT_POS   (KEXEC_IMAGE_NR + 0)
 #define KEXEC_FLAG_CRASH_POS     (KEXEC_IMAGE_NR + 1)
 #define KEXEC_FLAG_IN_PROGRESS   (KEXEC_IMAGE_NR + 2)
+#define KEXEC_FLAG_IN_HYPERCALL  (KEXEC_IMAGE_NR + 3)
 
 static unsigned long kexec_flags = 0; /* the lowest bits are for KEXEC_IMAGE... */
 
@@ -87,7 +88,7 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
 /*
  * Parse command lines in the format
  *
- *   crashkernel=<ramsize-range>:<size>[,...][{@,<}<address>]
+ *   crashkernel=<ramsize-range>:<size>[,...][{@,<,below=}<address>]
  *
  * with <ramsize-range> being of form
  *
@@ -96,10 +97,15 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
  * as well as the legacy ones in the format
  *
  *   crashkernel=<size>[{@,<}<address>]
+ *   crashkernel=<size>,below=address
+ *
+ * < and below are synonyomous, the latter being useful for grub2 systems
+ * which would otherwise require escaping of the < option
  */
-static void __init parse_crashkernel(const char *str)
+static int __init parse_crashkernel(const char *str)
 {
     const char *cur;
+    int rc = 0;
 
     if ( strchr(str, ':' ) )
     {
@@ -110,7 +116,8 @@ static void __init parse_crashkernel(const char *str)
             {
                 printk(XENLOG_WARNING "crashkernel: too many ranges\n");
                 cur = NULL;
-                str = strpbrk(str, "@<");
+                str = strpbrk(str, "@,<");
+                rc = -EINVAL;
                 break;
             }
 
@@ -121,6 +128,7 @@ static void __init parse_crashkernel(const char *str)
             if ( *str != '-' )
             {
                 printk(XENLOG_WARNING "crashkernel: '-' expected\n");
+                rc = -EINVAL;
                 break;
             }
 
@@ -132,6 +140,7 @@ static void __init parse_crashkernel(const char *str)
                 if ( ranges[idx].end <= ranges[idx].start )
                 {
                     printk(XENLOG_WARNING "crashkernel: end <= start\n");
+                    rc = -EINVAL;
                     break;
                 }
             }
@@ -141,6 +150,7 @@ static void __init parse_crashkernel(const char *str)
             if ( *str != ':' )
             {
                 printk(XENLOG_WARNING "crashkernel: ':' expected\n");
+                rc = -EINVAL;
                 break;
             }
 
@@ -161,11 +171,21 @@ static void __init parse_crashkernel(const char *str)
             kexec_crash_area.start = parse_size_and_unit(cur = str + 1, &str);
         else if ( *str == '<' )
             kexec_crash_area_limit = parse_size_and_unit(cur = str + 1, &str);
+        else if ( !strncmp(str, ",below=", 7) )
+            kexec_crash_area_limit = parse_size_and_unit(cur = str + 7, &str);
         else
+        {
             printk(XENLOG_WARNING "crashkernel: '%s' ignored\n", str);
+            rc = -EINVAL;
+        }
     }
     if ( cur && cur == str )
+    {
         printk(XENLOG_WARNING "crashkernel: memory value expected\n");
+        rc = -EINVAL;
+    }
+
+    return rc;
 }
 custom_param("crashkernel", parse_crashkernel);
 
@@ -179,7 +199,7 @@ custom_param("crashkernel", parse_crashkernel);
  * - all will allocate additional structures such as domain and vcpu structs
  *       low so the crash kernel can perform an extended analysis of state.
  */
-static void __init parse_low_crashinfo(const char * str)
+static int __init parse_low_crashinfo(const char *str)
 {
 
     if ( !strlen(str) )
@@ -195,7 +215,10 @@ static void __init parse_low_crashinfo(const char * str)
     {
         printk("Unknown low_crashinfo parameter '%s'.  Defaulting to min.\n", str);
         low_crashinfo_mode = LOW_CRASHINFO_MIN;
+        return -EINVAL;
     }
+
+    return 0;
 }
 custom_param("low_crashinfo", parse_low_crashinfo);
 
@@ -205,19 +228,25 @@ custom_param("low_crashinfo", parse_low_crashinfo);
  *
  * <addr> will be rounded down to the nearest power of two.  Defaults to 64G
  */
-static void __init parse_crashinfo_maxaddr(const char * str)
+static int __init parse_crashinfo_maxaddr(const char *str)
 {
     u64 addr;
+    const char *q;
 
     /* if low_crashinfo_mode is unset, default to min. */
     if ( low_crashinfo_mode == LOW_CRASHINFO_INVALID )
         low_crashinfo_mode = LOW_CRASHINFO_MIN;
 
-    if ( (addr = parse_size_and_unit(str, NULL)) )
+    if ( (addr = parse_size_and_unit(str, &q)) )
         crashinfo_maxaddr = addr;
     else
+    {
         printk("Unable to parse crashinfo_maxaddr. Defaulting to %"PRIpaddr"\n",
                crashinfo_maxaddr);
+        return -EINVAL;
+    }
+
+    return *q ? -EINVAL : 0;
 }
 custom_param("crashinfo_maxaddr", parse_crashinfo_maxaddr);
 
@@ -819,7 +848,6 @@ static int kexec_exec(XEN_GUEST_HANDLE_PARAM(void) uarg)
 static int kexec_swap_images(int type, struct kexec_image *new,
                              struct kexec_image **old)
 {
-    static DEFINE_SPINLOCK(kexec_lock);
     int base, bit, pos;
     int new_slot, old_slot;
 
@@ -831,23 +859,19 @@ static int kexec_swap_images(int type, struct kexec_image *new,
     if ( kexec_load_get_bits(type, &base, &bit) )
         return -EINVAL;
 
-    spin_lock(&kexec_lock);
+    ASSERT(test_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags));
 
     pos = (test_bit(bit, &kexec_flags) != 0);
     old_slot = base + pos;
     new_slot = base + !pos;
 
+    kexec_image[new_slot] = new;
     if ( new )
-    {
-        kexec_image[new_slot] = new;
         set_bit(new_slot, &kexec_flags);
-    }
     change_bit(bit, &kexec_flags);
 
     clear_bit(old_slot, &kexec_flags);
     *old = kexec_image[old_slot];
-
-    spin_unlock(&kexec_lock);
 
     return 0;
 }
@@ -881,11 +905,11 @@ static uint16_t kexec_load_v1_arch(void)
 #endif
 }
 
-static int kexec_segments_add_segment(
-    unsigned int *nr_segments, xen_kexec_segment_t *segments,
-    unsigned long mfn)
+static int kexec_segments_add_segment(unsigned int *nr_segments,
+                                      xen_kexec_segment_t *segments,
+                                      mfn_t mfn)
 {
-    paddr_t maddr = (paddr_t)mfn << PAGE_SHIFT;
+    paddr_t maddr = mfn_to_maddr(mfn);
     unsigned int n = *nr_segments;
 
     /* Need a new segment? */
@@ -906,7 +930,7 @@ static int kexec_segments_add_segment(
     return 0;
 }
 
-static int kexec_segments_from_ind_page(unsigned long mfn,
+static int kexec_segments_from_ind_page(mfn_t mfn,
                                         unsigned int *nr_segments,
                                         xen_kexec_segment_t *segments,
                                         bool_t compat)
@@ -915,7 +939,7 @@ static int kexec_segments_from_ind_page(unsigned long mfn,
     kimage_entry_t *entry;
     int ret = 0;
 
-    page = map_domain_page(_mfn(mfn));
+    page = map_domain_page(mfn);
 
     /*
      * Walk the indirection page list, adding destination pages to the
@@ -937,7 +961,7 @@ static int kexec_segments_from_ind_page(unsigned long mfn,
             break;
         case IND_INDIRECTION:
             unmap_domain_page(page);
-            entry = page = map_domain_page(_mfn(mfn));
+            entry = page = map_domain_page(mfn);
             continue;
         case IND_DONE:
             goto done;
@@ -966,7 +990,7 @@ static int kexec_do_load_v1(xen_kexec_load_v1_t *load, int compat)
     xen_kexec_segment_t *segments;
     uint16_t arch;
     unsigned int nr_segments = 0;
-    unsigned long ind_mfn = load->image.indirection_page >> PAGE_SHIFT;
+    mfn_t ind_mfn = maddr_to_mfn(load->image.indirection_page);
     int ret;
 
     arch = kexec_load_v1_arch();
@@ -1195,6 +1219,9 @@ static int do_kexec_op_internal(unsigned long op,
     if ( ret )
         return ret;
 
+    if ( test_and_set_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags) )
+        return hypercall_create_continuation(__HYPERVISOR_kexec_op, "lh", op, uarg);
+
     switch ( op )
     {
     case KEXEC_CMD_kexec_get_range:
@@ -1228,6 +1255,8 @@ static int do_kexec_op_internal(unsigned long op,
         ret = kexec_status(uarg);
         break;
     }
+
+    clear_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags);
 
     return ret;
 }

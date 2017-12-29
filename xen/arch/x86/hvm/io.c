@@ -59,7 +59,7 @@ void send_timeoffset_req(unsigned long timeoff)
     if ( timeoff == 0 )
         return;
 
-    if ( hvm_broadcast_ioreq(&p, 1) != 0 )
+    if ( hvm_broadcast_ioreq(&p, true) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful timeoffset update\n");
 }
 
@@ -73,11 +73,11 @@ void send_invalidate_req(void)
         .data = ~0UL, /* flush all */
     };
 
-    if ( hvm_broadcast_ioreq(&p, 0) != 0 )
+    if ( hvm_broadcast_ioreq(&p, false) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful map-cache invalidate\n");
 }
 
-bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate)
+bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate, const char *descr)
 {
     struct hvm_emulate_ctxt ctxt;
     struct vcpu *curr = current;
@@ -88,7 +88,7 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate)
 
     rc = hvm_emulate_one(&ctxt);
 
-    if ( hvm_vcpu_io_need_completion(vio) || vio->mmio_retry )
+    if ( hvm_vcpu_io_need_completion(vio) )
         vio->io_completion = HVMIO_mmio_completion;
     else
         vio->mmio_access = (struct npfec){};
@@ -96,12 +96,16 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate)
     switch ( rc )
     {
     case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_WARNING "MMIO", &ctxt);
+        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
         return false;
 
+    case X86EMUL_UNRECOGNIZED:
+        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
+        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+        break;
+
     case X86EMUL_EXCEPTION:
-        if ( ctxt.ctxt.event_pending )
-            hvm_inject_event(&ctxt.ctxt.event);
+        hvm_inject_event(&ctxt.ctxt.event);
         break;
     }
 
@@ -167,16 +171,16 @@ bool handle_pio(uint16_t port, unsigned int size, int dir)
     return true;
 }
 
-static bool_t dpci_portio_accept(const struct hvm_io_handler *handler,
-                                 const ioreq_t *p)
+static bool_t g2m_portio_accept(const struct hvm_io_handler *handler,
+                                const ioreq_t *p)
 {
     struct vcpu *curr = current;
-    const struct domain_iommu *dio = dom_iommu(curr->domain);
+    const struct hvm_domain *hvm_domain = &curr->domain->arch.hvm_domain;
     struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
     struct g2m_ioport *g2m_ioport;
     unsigned int start, end;
 
-    list_for_each_entry( g2m_ioport, &dio->arch.g2m_ioport_list, list )
+    list_for_each_entry( g2m_ioport, &hvm_domain->g2m_ioport_list, list )
     {
         start = g2m_ioport->gport;
         end = start + g2m_ioport->np;
@@ -190,10 +194,8 @@ static bool_t dpci_portio_accept(const struct hvm_io_handler *handler,
     return 0;
 }
 
-static int dpci_portio_read(const struct hvm_io_handler *handler,
-                            uint64_t addr,
-                            uint32_t size,
-                            uint64_t *data)
+static int g2m_portio_read(const struct hvm_io_handler *handler,
+                           uint64_t addr, uint32_t size, uint64_t *data)
 {
     struct hvm_vcpu_io *vio = &current->arch.hvm_vcpu.hvm_io;
     const struct g2m_ioport *g2m_ioport = vio->g2m_ioport;
@@ -217,10 +219,8 @@ static int dpci_portio_read(const struct hvm_io_handler *handler,
     return X86EMUL_OKAY;
 }
 
-static int dpci_portio_write(const struct hvm_io_handler *handler,
-                             uint64_t addr,
-                             uint32_t size,
-                             uint64_t data)
+static int g2m_portio_write(const struct hvm_io_handler *handler,
+                            uint64_t addr, uint32_t size, uint64_t data)
 {
     struct hvm_vcpu_io *vio = &current->arch.hvm_vcpu.hvm_io;
     const struct g2m_ioport *g2m_ioport = vio->g2m_ioport;
@@ -244,13 +244,13 @@ static int dpci_portio_write(const struct hvm_io_handler *handler,
     return X86EMUL_OKAY;
 }
 
-static const struct hvm_io_ops dpci_portio_ops = {
-    .accept = dpci_portio_accept,
-    .read = dpci_portio_read,
-    .write = dpci_portio_write
+static const struct hvm_io_ops g2m_portio_ops = {
+    .accept = g2m_portio_accept,
+    .read = g2m_portio_read,
+    .write = g2m_portio_write
 };
 
-void register_dpci_portio_handler(struct domain *d)
+void register_g2m_portio_handler(struct domain *d)
 {
     struct hvm_io_handler *handler = hvm_next_io_handler(d);
 
@@ -258,7 +258,26 @@ void register_dpci_portio_handler(struct domain *d)
         return;
 
     handler->type = IOREQ_TYPE_PIO;
-    handler->ops = &dpci_portio_ops;
+    handler->ops = &g2m_portio_ops;
+}
+
+unsigned int hvm_pci_decode_addr(unsigned int cf8, unsigned int addr,
+                                 unsigned int *bus, unsigned int *slot,
+                                 unsigned int *func)
+{
+    unsigned int bdf;
+
+    ASSERT(CF8_ENABLED(cf8));
+
+    bdf = CF8_BDF(cf8);
+    *bus = PCI_BUS(bdf);
+    *slot = PCI_SLOT(bdf);
+    *func = PCI_FUNC(bdf);
+    /*
+     * NB: the lower 2 bits of the register address are fetched from the
+     * offset into the 0xcfc register when reading/writing to it.
+     */
+    return CF8_ADDR_LO(cf8) | (addr & 3);
 }
 
 /*

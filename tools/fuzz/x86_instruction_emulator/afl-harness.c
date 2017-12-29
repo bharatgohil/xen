@@ -4,18 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include "fuzz-emul.h"
 
-extern int LLVMFuzzerInitialize(int *argc, char ***argv);
-extern int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size);
-extern unsigned int fuzz_minimal_input_size(void);
-
-#define INPUT_SIZE  4096
 static uint8_t input[INPUT_SIZE];
 
 int main(int argc, char **argv)
 {
     size_t size;
     FILE *fp = NULL;
+    int max, count;
 
     setbuf(stdin, NULL);
     setbuf(stdout, NULL);
@@ -42,8 +39,7 @@ int main(int argc, char **argv)
             break;
 
         case '?':
-        usage:
-            printf("Usage: %s $FILE | [--min-input-size]\n", argv[0]);
+            printf("Usage: %s $FILE [$FILE...] | [--min-input-size]\n", argv[0]);
             exit(-1);
             break;
 
@@ -54,10 +50,13 @@ int main(int argc, char **argv)
         }
     }
 
-    if ( optind == argc ) /* No positional parameters.  Use stdin. */
+    max = argc - optind;
+
+    if ( !max ) /* No positional parameters.  Use stdin. */
+    {
+        max = 1;
         fp = stdin;
-    else if ( optind != (argc - 1) )
-        goto usage;
+    }
 
     if ( LLVMFuzzerInitialize(&argc, &argv) )
         exit(-1);
@@ -65,18 +64,32 @@ int main(int argc, char **argv)
 #ifdef __AFL_HAVE_MANUAL_CONTROL
     __AFL_INIT();
 
-    while ( __AFL_LOOP(1000) )
+    for( count = 0; __AFL_LOOP(1000); )
+#else
+    for( count = 0; count < max; count++ )
 #endif
     {
         if ( fp != stdin ) /* If not using stdin, open the provided file. */
         {
-            fp = fopen(argv[optind], "rb");
+            printf("Opening file %s\n", argv[optind + count]);
+            fp = fopen(argv[optind + count], "rb");
             if ( fp == NULL )
             {
                 perror("fopen");
                 exit(-1);
             }
         }
+#ifdef __AFL_HAVE_MANUAL_CONTROL
+        else
+        {
+            /* 
+             * This will ensure we're dealing with a clean stream
+             * state after the afl-fuzz process messes with the open
+             * file handle.
+             */
+            fseek(fp, 0, SEEK_SET);
+        }
+#endif
 
         size = fread(input, 1, INPUT_SIZE, fp);
 
@@ -86,10 +99,17 @@ int main(int argc, char **argv)
             exit(-1);
         }
 
-        if ( !feof(fp) )
+        /* Only run the test if the input file was smaller than INPUT_SIZE */
+        if ( feof(fp) )
+        {
+            LLVMFuzzerTestOneInput(input, size);
+        }
+        else
         {
             printf("Input too large\n");
-            exit(-1);
+            /* Don't exit if we're doing batch processing */
+            if ( max == 1 )
+                exit(-1);
         }
 
         if ( fp != stdin )
@@ -97,8 +117,6 @@ int main(int argc, char **argv)
             fclose(fp);
             fp = NULL;
         }
-
-        LLVMFuzzerTestOneInput(input, size);
     }
 
     return 0;

@@ -25,6 +25,7 @@
 #include <xen/livepatch.h>
 #include <xen/livepatch_payload.h>
 
+#include <asm/alternative.h>
 #include <asm/event.h>
 
 /*
@@ -103,7 +104,7 @@ static struct livepatch_work livepatch_work;
  */
 static DEFINE_PER_CPU(bool_t, work_to_do);
 
-static int get_name(const xen_livepatch_name_t *name, char *n)
+static int get_name(const struct xen_livepatch_name *name, char *n)
 {
     if ( !name->size || name->size > XEN_LIVEPATCH_NAME_SIZE )
         return -EINVAL;
@@ -120,7 +121,7 @@ static int get_name(const xen_livepatch_name_t *name, char *n)
     return 0;
 }
 
-static int verify_payload(const xen_sysctl_livepatch_upload_t *upload, char *n)
+static int verify_payload(const struct xen_sysctl_livepatch_upload *upload, char *n)
 {
     if ( get_name(&upload->name, n) )
         return -EINVAL;
@@ -416,9 +417,12 @@ static int move_payload(struct payload *payload, struct livepatch_elf *elf)
         }
     }
 
-    /* Only one RW section with non-zero size: .livepatch.funcs */
-    if ( rw_buf_cnt == 1 &&
-         !strcmp(elf->sec[rw_buf_sec].name, ELF_LIVEPATCH_FUNC) )
+    /*
+     * Only one RW section with non-zero size: .livepatch.funcs,
+     * or only RO sections.
+     */
+    if ( !rw_buf_cnt || (rw_buf_cnt == 1 &&
+         !strcmp(elf->sec[rw_buf_sec].name, ELF_LIVEPATCH_FUNC)) )
         payload->safe_to_reapply = true;
  out:
     xfree(offset);
@@ -454,6 +458,22 @@ static int secure_payload(struct payload *payload, struct livepatch_elf *elf)
     ASSERT(ro_pages + rw_pages + text_pages == payload->pages);
 
     return rc;
+}
+
+static bool section_ok(const struct livepatch_elf *elf,
+                       const struct livepatch_elf_sec *sec, size_t sz)
+{
+    if ( !elf || !sec )
+        return false;
+
+    if ( sec->sec->sh_size % sz )
+    {
+        dprintk(XENLOG_ERR, LIVEPATCH "%s: Wrong size %"PRIuElfWord" of %s (must be multiple of %zu)\n",
+                elf->name, sec->sec->sh_size, sec->name, sz);
+        return false;
+    }
+
+    return true;
 }
 
 static int check_special_sections(const struct livepatch_elf *elf)
@@ -505,12 +525,8 @@ static int prepare_payload(struct payload *payload,
 
     sec = livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_FUNC);
     ASSERT(sec);
-    if ( sec->sec->sh_size % sizeof(*payload->funcs) )
-    {
-        dprintk(XENLOG_ERR, LIVEPATCH "%s: Wrong size of "ELF_LIVEPATCH_FUNC"!\n",
-                elf->name);
+    if ( !section_ok(elf, sec, sizeof(*payload->funcs)) )
         return -EINVAL;
-    }
 
     payload->funcs = sec->load_addr;
     payload->nfuncs = sec->sec->sh_size / sizeof(*payload->funcs);
@@ -552,7 +568,7 @@ static int prepare_payload(struct payload *payload,
     sec = livepatch_elf_sec_by_name(elf, ".livepatch.hooks.load");
     if ( sec )
     {
-        if ( sec->sec->sh_size % sizeof(*payload->load_funcs) )
+        if ( !section_ok(elf, sec, sizeof(*payload->load_funcs)) )
             return -EINVAL;
 
         payload->load_funcs = sec->load_addr;
@@ -562,7 +578,7 @@ static int prepare_payload(struct payload *payload,
     sec = livepatch_elf_sec_by_name(elf, ".livepatch.hooks.unload");
     if ( sec )
     {
-        if ( sec->sec->sh_size % sizeof(*payload->unload_funcs) )
+        if ( !section_ok(elf, sec, sizeof(*payload->unload_funcs)) )
             return -EINVAL;
 
         payload->unload_funcs = sec->load_addr;
@@ -633,12 +649,8 @@ static int prepare_payload(struct payload *payload,
         if ( !sec )
             continue;
 
-        if ( sec->sec->sh_size % sizeof(*region->frame[i].bugs) )
-        {
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Wrong size of .bug_frames.%u!\n",
-                    elf->name, i);
+        if ( !section_ok(elf, sec, sizeof(*region->frame[i].bugs)) )
             return -EINVAL;
-        }
 
         region->frame[i].bugs = sec->load_addr;
         region->frame[i].n_bugs = sec->sec->sh_size /
@@ -651,12 +663,8 @@ static int prepare_payload(struct payload *payload,
 #ifdef CONFIG_HAS_ALTERNATIVE
         struct alt_instr *a, *start, *end;
 
-        if ( sec->sec->sh_size % sizeof(*a) )
-        {
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Size of .alt_instr is not multiple of %zu!\n",
-                    elf->name, sizeof(*a));
+        if ( !section_ok(elf, sec, sizeof(*a)) )
             return -EINVAL;
-        }
 
         start = sec->load_addr;
         end = sec->load_addr + sec->sec->sh_size;
@@ -688,14 +696,8 @@ static int prepare_payload(struct payload *payload,
 #ifdef CONFIG_HAS_EX_TABLE
         struct exception_table_entry *s, *e;
 
-        if ( !sec->sec->sh_size ||
-             (sec->sec->sh_size % sizeof(*region->ex)) )
-        {
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Wrong size of .ex_table (exp:%lu vs %lu)!\n",
-                    elf->name, sizeof(*region->ex),
-                    sec->sec->sh_size);
+        if ( !section_ok(elf, sec, sizeof(*region->ex)) )
             return -EINVAL;
-        }
 
         s = sec->load_addr;
         e = sec->load_addr + sec->sec->sh_size;
@@ -770,8 +772,8 @@ static int build_symbol_table(struct payload *payload,
         }
     }
 
-    symtab = xmalloc_array(struct livepatch_symbol, nsyms);
-    strtab = xmalloc_array(char, strtab_len);
+    symtab = xzalloc_array(struct livepatch_symbol, nsyms);
+    strtab = xzalloc_array(char, strtab_len);
 
     if ( !strtab || !symtab )
     {
@@ -896,7 +898,7 @@ static int load_payload_data(struct payload *payload, void *raw, size_t len)
     return rc;
 }
 
-static int livepatch_upload(xen_sysctl_livepatch_upload_t *upload)
+static int livepatch_upload(struct xen_sysctl_livepatch_upload *upload)
 {
     struct payload *data, *found;
     char n[XEN_LIVEPATCH_NAME_SIZE];
@@ -953,7 +955,7 @@ static int livepatch_upload(xen_sysctl_livepatch_upload_t *upload)
     return rc;
 }
 
-static int livepatch_get(xen_sysctl_livepatch_get_t *get)
+static int livepatch_get(struct xen_sysctl_livepatch_get *get)
 {
     struct payload *data;
     int rc;
@@ -984,9 +986,9 @@ static int livepatch_get(xen_sysctl_livepatch_get_t *get)
     return 0;
 }
 
-static int livepatch_list(xen_sysctl_livepatch_list_t *list)
+static int livepatch_list(struct xen_sysctl_livepatch_list *list)
 {
-    xen_livepatch_status_t status;
+    struct xen_livepatch_status status;
     struct payload *data;
     unsigned int idx = 0, i = 0;
     int rc = 0;
@@ -1450,7 +1452,7 @@ static int build_id_dep(struct payload *payload, bool_t internal)
     return 0;
 }
 
-static int livepatch_action(xen_sysctl_livepatch_action_t *action)
+static int livepatch_action(struct xen_sysctl_livepatch_action *action)
 {
     struct payload *data;
     char n[XEN_LIVEPATCH_NAME_SIZE];
@@ -1559,7 +1561,7 @@ static int livepatch_action(xen_sysctl_livepatch_action_t *action)
     return rc;
 }
 
-int livepatch_op(xen_sysctl_livepatch_op_t *livepatch)
+int livepatch_op(struct xen_sysctl_livepatch_op *livepatch)
 {
     int rc;
 
@@ -1641,7 +1643,7 @@ static void livepatch_printall(unsigned char key)
             {
                 spin_unlock(&payload_lock);
                 process_pending_softirqs();
-                if ( spin_trylock(&payload_lock) )
+                if ( !spin_trylock(&payload_lock) )
                 {
                     printk("Couldn't reacquire lock. Try again.\n");
                     return;

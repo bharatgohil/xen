@@ -16,7 +16,7 @@ build: $(TARGETS)
 
 .PHONY: clean
 clean:
-	$(RM) *.o $(TARGETS) *~ $(DEPS)
+	$(RM) *.o $(TARGETS) *~ $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
@@ -24,4 +24,4 @@ distclean: clean
 xs-test: xs-test.o Makefile
 	$(CC) -o $@ $< $(LDFLAGS) $(LDLIBS_libxenstore)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

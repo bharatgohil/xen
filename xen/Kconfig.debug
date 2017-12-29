@@ -3,7 +3,7 @@ menu "Debugging Options"
 
 config DEBUG
 	bool "Developer Checks"
-	default y
+	default n
 	---help---
 	  If you say Y here this will enable developer checks such as asserts
 	  and extra printks. This option is intended for development purposes
@@ -31,6 +31,7 @@ config FRAME_POINTER
 config GCOV
 	bool "Gcov Support"
 	depends on !LIVEPATCH
+	select SUPPRESS_DUPLICATE_SYMBOL_WARNINGS
 	---help---
 	  Enable gcov (a test coverage program in GCC) support.
 
@@ -50,11 +51,17 @@ config GCOV_FORMAT_AUTODETECT
 	---help---
 	  Automatically select gcov format based on gcc version.
 
+config GCOV_FORMAT_7
+	bool "GCC 7 format"
+	---help---
+	  Select this option to use the format specified in GCC 7.
+	  Works in gcc version range [7, ...).
+
 config GCOV_FORMAT_5
 	bool "GCC 5 format"
 	---help---
 	  Select this option to use the format specified in GCC 5.
-	  Works in gcc version range [5, ...).
+	  Works in gcc version range [5, 7).
 
 config GCOV_FORMAT_4_9
 	bool "GCC 4.9 format"
@@ -111,6 +118,23 @@ config DEVICE_TREE_DEBUG
 	---help---
 	  Device tree parsing and DOM0 device tree building messages are
 	  logged in the Xen ring buffer.
+	  If unsure, say N here.
+
+config SCRUB_DEBUG
+	bool "Page scrubbing test"
+	default DEBUG
+	---help---
+	  Verify that pages that need to be scrubbed before being allocated to
+	  a guest are indeed scrubbed.
+
+config UBSAN
+	bool "Undefined behaviour sanitizer"
+	depends on HAS_UBSAN
+	---help---
+	  Enable undefined behaviour sanitizer. It uses compiler to insert code
+	  snippets so that undefined behaviours in C are detected during runtime.
+	  This requires a UBSAN capable compiler and it is a debug only feature.
+
 	  If unsure, say N here.
 
 endif # DEBUG || EXPERT

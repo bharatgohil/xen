@@ -4,6 +4,7 @@
 #include <xen/cpumask.h>
 #include <xen/pci.h>
 #include <asm/byteorder.h>
+#include <asm/hvm/vmx/vmcs.h>
 
 /*
  * Constants for Intel APIC based MSI messages.
@@ -82,7 +83,7 @@ struct msi_desc;
 /* Helper functions */
 extern int pci_enable_msi(struct msi_info *msi, struct msi_desc **desc);
 extern void pci_disable_msi(struct msi_desc *desc);
-extern int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool_t off);
+extern int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool off);
 extern void pci_cleanup_msi(struct pci_dev *pdev);
 extern int setup_msi_irq(struct irq_desc *, struct msi_desc *);
 extern int __setup_msi_irq(struct irq_desc *, struct msi_desc *,
@@ -102,6 +103,10 @@ struct msi_desc {
 		__u16	entry_nr;	/* specific enabled entry 	  */
 	} msi_attrib;
 
+	bool irte_initialized;
+	uint8_t gvec;			/* guest vector. valid when pi_desc isn't NULL */
+	const struct pi_desc *pi_desc;	/* pointer to posted descriptor */
+
 	struct list_head list;
 
 	union {
@@ -114,10 +119,9 @@ struct msi_desc {
 	};
 	struct pci_dev *dev;
 	int irq;
+	int remap_index;		/* index in interrupt remapping table */
 
 	struct msi_msg msg;		/* Last set MSI message */
-
-	int remap_index;		/* index in interrupt remapping table */
 };
 
 /*
@@ -231,7 +235,7 @@ struct arch_msix {
     int table_refcnt[MAX_MSIX_TABLE_PAGES];
     int table_idx[MAX_MSIX_TABLE_PAGES];
     spinlock_t table_lock;
-    bool_t host_maskall, guest_maskall;
+    bool host_maskall, guest_maskall;
     domid_t warned;
 };
 
@@ -241,7 +245,7 @@ void msi_compose_msg(unsigned vector, const cpumask_t *mask,
 void __msi_set_enable(u16 seg, u8 bus, u8 slot, u8 func, int pos, int enable);
 void mask_msi_irq(struct irq_desc *);
 void unmask_msi_irq(struct irq_desc *);
-void guest_mask_msi_irq(struct irq_desc *, bool_t mask);
+void guest_mask_msi_irq(struct irq_desc *, bool mask);
 void ack_nonmaskable_msi_irq(struct irq_desc *);
 void end_nonmaskable_msi_irq(struct irq_desc *, u8 vector);
 void set_msi_affinity(struct irq_desc *, const cpumask_t *);

@@ -104,17 +104,17 @@ static int monitor_disable_msr(struct domain *d, u32 msr)
     return 0;
 }
 
-bool_t monitored_msr(const struct domain *d, u32 msr)
+bool monitored_msr(const struct domain *d, u32 msr)
 {
     const unsigned long *bitmap;
 
     if ( !d->arch.monitor.msr_bitmap )
-        return 0;
+        return false;
 
     bitmap = monitor_bitmap_for_msr(d, &msr);
 
     if ( !bitmap )
-        return 0;
+        return false;
 
     return test_bit(msr, bitmap);
 }
@@ -123,17 +123,20 @@ int arch_monitor_domctl_event(struct domain *d,
                               struct xen_domctl_monitor_op *mop)
 {
     struct arch_domain *ad = &d->arch;
-    bool_t requested_status = (XEN_DOMCTL_MONITOR_OP_ENABLE == mop->op);
+    bool requested_status = (XEN_DOMCTL_MONITOR_OP_ENABLE == mop->op);
 
     switch ( mop->event )
     {
     case XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG:
     {
         unsigned int ctrlreg_bitmask;
-        bool_t old_status;
+        bool old_status;
 
-        /* sanity check: avoid left-shift undefined behavior */
-        if ( unlikely(mop->u.mov_to_cr.index > 31) )
+        if ( unlikely(mop->u.mov_to_cr.index >=
+                      ARRAY_SIZE(ad->monitor.write_ctrlreg_mask)) )
+            return -EINVAL;
+
+        if ( unlikely(mop->u.mov_to_cr.pad1 || mop->u.mov_to_cr.pad2) )
             return -EINVAL;
 
         ctrlreg_bitmask = monitor_ctrlreg_bitmask(mop->u.mov_to_cr.index);
@@ -155,9 +158,15 @@ int arch_monitor_domctl_event(struct domain *d,
             ad->monitor.write_ctrlreg_onchangeonly &= ~ctrlreg_bitmask;
 
         if ( requested_status )
+        {
+            ad->monitor.write_ctrlreg_mask[mop->u.mov_to_cr.index] = mop->u.mov_to_cr.bitmask;
             ad->monitor.write_ctrlreg_enabled |= ctrlreg_bitmask;
+        }
         else
+        {
+            ad->monitor.write_ctrlreg_mask[mop->u.mov_to_cr.index] = 0;
             ad->monitor.write_ctrlreg_enabled &= ~ctrlreg_bitmask;
+        }
 
         if ( VM_EVENT_X86_CR3 == mop->u.mov_to_cr.index )
         {
@@ -174,7 +183,7 @@ int arch_monitor_domctl_event(struct domain *d,
 
     case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR:
     {
-        bool_t old_status;
+        bool old_status;
         int rc;
         u32 msr = mop->u.mov_to_msr.msr;
 
@@ -200,7 +209,7 @@ int arch_monitor_domctl_event(struct domain *d,
 
     case XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP:
     {
-        bool_t old_status = ad->monitor.singlestep_enabled;
+        bool old_status = ad->monitor.singlestep_enabled;
 
         if ( unlikely(old_status == requested_status) )
             return -EEXIST;
@@ -211,9 +220,30 @@ int arch_monitor_domctl_event(struct domain *d,
         break;
     }
 
+    case XEN_DOMCTL_MONITOR_EVENT_DESC_ACCESS:
+    {
+        bool old_status = ad->monitor.descriptor_access_enabled;
+        struct vcpu *v;
+
+        if ( unlikely(old_status == requested_status) )
+            return -EEXIST;
+
+        if ( !hvm_funcs.set_descriptor_access_exiting )
+            return -EOPNOTSUPP;
+
+        domain_pause(d);
+        ad->monitor.descriptor_access_enabled = requested_status;
+
+        for_each_vcpu ( d, v )
+            hvm_funcs.set_descriptor_access_exiting(v, requested_status);
+
+        domain_unpause(d);
+        break;
+    }
+
     case XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT:
     {
-        bool_t old_status = ad->monitor.software_breakpoint_enabled;
+        bool old_status = ad->monitor.software_breakpoint_enabled;
 
         if ( unlikely(old_status == requested_status) )
             return -EEXIST;
@@ -226,7 +256,7 @@ int arch_monitor_domctl_event(struct domain *d,
 
     case XEN_DOMCTL_MONITOR_EVENT_DEBUG_EXCEPTION:
     {
-        bool_t old_status = ad->monitor.debug_exception_enabled;
+        bool old_status = ad->monitor.debug_exception_enabled;
 
         if ( unlikely(old_status == requested_status) )
             return -EEXIST;
@@ -242,13 +272,26 @@ int arch_monitor_domctl_event(struct domain *d,
 
     case XEN_DOMCTL_MONITOR_EVENT_CPUID:
     {
-        bool_t old_status = ad->monitor.cpuid_enabled;
+        bool old_status = ad->monitor.cpuid_enabled;
 
         if ( unlikely(old_status == requested_status) )
             return -EEXIST;
 
         domain_pause(d);
         ad->monitor.cpuid_enabled = requested_status;
+        domain_unpause(d);
+        break;
+    }
+
+    case XEN_DOMCTL_MONITOR_EVENT_EMUL_UNIMPLEMENTED:
+    {
+        bool old_status = ad->monitor.emul_unimplemented_enabled;
+
+        if ( unlikely(old_status == requested_status) )
+            return -EEXIST;
+
+        domain_pause(d);
+        ad->monitor.emul_unimplemented_enabled = requested_status;
         domain_unpause(d);
         break;
     }

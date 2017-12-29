@@ -211,15 +211,15 @@ struct acpi_drhd_unit *acpi_find_matched_drhd_unit(const struct pci_dev *pdev)
     if ( pdev == NULL )
         return NULL;
 
-    if ( pdev->info.is_extfn )
+    if ( pdev->info.is_virtfn )
+    {
+        bus = pdev->info.physfn.bus;
+        devfn = !pdev->info.is_extfn ? pdev->info.physfn.devfn : 0;
+    }
+    else if ( pdev->info.is_extfn )
     {
         bus = pdev->bus;
         devfn = 0;
-    }
-    else if ( pdev->info.is_virtfn )
-    {
-        bus = pdev->info.physfn.bus;
-        devfn = PCI_SLOT(pdev->info.physfn.devfn) ? 0 : pdev->info.physfn.devfn;
     }
     else
     {
@@ -1090,22 +1090,25 @@ int intel_iommu_get_reserved_device_memory(iommu_grdm_t *func, void *ctxt)
  * If a segment is specified for other than the first device, and it does not
  * match the one specified for the first one, an error will be reported.
  */
-static void __init parse_rmrr_param(const char *str)
+static int __init parse_rmrr_param(const char *str)
 {
     const char *s = str, *cur, *stmp;
     unsigned int seg, bus, dev, func, dev_count;
     unsigned long start, end;
 
     do {
+        if ( nr_rmrr >= MAX_USER_RMRR )
+            return -E2BIG;
+
         start = simple_strtoul(cur = s, &s, 16);
         if ( cur == s )
-            break;
+            return -EINVAL;
 
         if ( *s == '-' )
         {
             end = simple_strtoul(cur = s + 1, &s, 16);
             if ( cur == s )
-                break;
+                return -EINVAL;
         }
         else
             end = start;
@@ -1121,7 +1124,7 @@ static void __init parse_rmrr_param(const char *str)
 
             stmp = parse_pci_seg(s + 1, &seg, &bus, &dev, &func, &def_seg);
             if ( !stmp )
-                break;
+                return -EINVAL;
 
             /*
              * Not specified.
@@ -1142,6 +1145,8 @@ static void __init parse_rmrr_param(const char *str)
         if ( user_rmrrs[nr_rmrr].dev_count )
             nr_rmrr++;
 
-    } while ( *s++ == ';' && nr_rmrr < MAX_USER_RMRR );
+    } while ( *s++ == ';' );
+
+    return s[-1] ? -EINVAL : 0;
 }
 custom_param("rmrr", parse_rmrr_param);

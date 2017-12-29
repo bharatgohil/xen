@@ -74,6 +74,11 @@ trampoline_gdt:
         /* 0x0028: real-mode data @ BOOT_TRAMPOLINE */
         .long   0x0000ffff
         .long   0x00009200
+        /*
+         * 0x0030: ring 0 Xen data, 16 MiB size, base
+         * address is computed at runtime.
+         */
+        .quad   0x00c0920000000fff
 
         .pushsection .trampoline_rel, "a"
         .long   trampoline_gdt + BOOT_PSEUDORM_CS + 2 - .
@@ -107,7 +112,7 @@ trampoline_protmode_entry:
         mov     %ecx,%cr4
 
         /* Load pagetable base register. */
-        mov     $sym_phys(idle_pg_table),%eax
+        mov     $sym_offs(idle_pg_table),%eax
         add     bootsym_rel(trampoline_xen_phys_start,4,%eax)
         mov     %eax,%cr3
 

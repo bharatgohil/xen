@@ -6,6 +6,14 @@
 #include <public/xen.h>
 #include <xen/pdx.h>
 
+#if defined(CONFIG_ARM_32)
+# include <asm/arm32/mm.h>
+#elif defined(CONFIG_ARM_64)
+# include <asm/arm64/mm.h>
+#else
+# error "unknown ARM variant"
+#endif
+
 /* Align Xen to a 2 MiB boundary. */
 #define XEN_PADDR_ALIGN (1 << 21)
 
@@ -34,10 +42,27 @@ struct page_info
             unsigned long type_info;
         } inuse;
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
-        struct {
-            /* Do TLBs need flushing for safety before next page use? */
-            bool_t need_tlbflush;
-        } free;
+        union {
+            struct {
+                /*
+                 * Index of the first *possibly* unscrubbed page in the buddy.
+                 * One more bit than maximum possible order to accommodate
+                 * INVALID_DIRTY_IDX.
+                 */
+#define INVALID_DIRTY_IDX ((1UL << (MAX_ORDER + 1)) - 1)
+                unsigned long first_dirty:MAX_ORDER + 1;
+
+                /* Do TLBs need flushing for safety before next page use? */
+                bool need_tlbflush:1;
+
+#define BUDDY_NOT_SCRUBBING    0
+#define BUDDY_SCRUBBING        1
+#define BUDDY_SCRUB_ABORT      2
+                unsigned long scrub_state:2;
+            };
+
+            unsigned long val;
+            } free;
 
     } u;
 
@@ -69,20 +94,12 @@ struct page_info
 #define PG_shift(idx)   (BITS_PER_LONG - (idx))
 #define PG_mask(x, idx) (x ## UL << PG_shift(idx))
 
-#define PGT_none          PG_mask(0, 4)  /* no special uses of this page   */
-#define PGT_writable_page PG_mask(7, 4)  /* has writable mappings?         */
-#define PGT_type_mask     PG_mask(15, 4) /* Bits 28-31 or 60-63.           */
-
- /* Owning guest has pinned this page to its current type? */
-#define _PGT_pinned       PG_shift(5)
-#define PGT_pinned        PG_mask(1, 5)
-
- /* Has this page been validated for use as its current type? */
-#define _PGT_validated    PG_shift(6)
-#define PGT_validated     PG_mask(1, 6)
+#define PGT_none          PG_mask(0, 1)  /* no special uses of this page   */
+#define PGT_writable_page PG_mask(1, 1)  /* has writable mappings?         */
+#define PGT_type_mask     PG_mask(1, 1)  /* Bits 31 or 63.                 */
 
  /* Count of uses of this frame as its current type. */
-#define PGT_count_width   PG_shift(9)
+#define PGT_count_width   PG_shift(2)
 #define PGT_count_mask    ((1UL<<PGT_count_width)-1)
 
  /* Cleared when the owning guest 'frees' this page. */
@@ -107,7 +124,14 @@ struct page_info
 #define PGC_count_width   PG_shift(9)
 #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
 
-extern unsigned long xenheap_mfn_start, xenheap_mfn_end;
+/*
+ * Page needs to be scrubbed. Since this bit can only be set on a page that is
+ * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
+ */
+#define _PGC_need_scrub   _PGC_allocated
+#define PGC_need_scrub    PGC_allocated
+
+extern mfn_t xenheap_mfn_start, xenheap_mfn_end;
 extern vaddr_t xenheap_virt_end;
 #ifdef CONFIG_ARM_64
 extern vaddr_t xenheap_virt_start;
@@ -117,7 +141,8 @@ extern vaddr_t xenheap_virt_start;
 #define is_xen_heap_page(page) is_xen_heap_mfn(page_to_mfn(page))
 #define is_xen_heap_mfn(mfn) ({                                 \
     unsigned long _mfn = (mfn);                                 \
-    (_mfn >= xenheap_mfn_start && _mfn < xenheap_mfn_end);      \
+    (_mfn >= mfn_x(xenheap_mfn_start) &&                        \
+     _mfn < mfn_x(xenheap_mfn_end));                            \
 })
 #else
 #define is_xen_heap_page(page) ((page)->count_info & PGC_xen_heap)
@@ -152,6 +177,8 @@ extern unsigned long total_pages;
 
 /* Boot-time pagetable setup */
 extern void setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr);
+/* Map FDT in boot pagetable */
+extern void *early_fdt_map(paddr_t fdt_paddr);
 /* Remove early mappings */
 extern void remove_early_mappings(void);
 /* Allocate and initialise pagetables for a secondary CPU. Sets init_ttbr to the
@@ -165,7 +192,7 @@ extern void setup_xenheap_mappings(unsigned long base_mfn, unsigned long nr_mfns
 /* Map a frame table to cover physical addresses ps through pe */
 extern void setup_frametable_mappings(paddr_t ps, paddr_t pe);
 /* Map a 4k page in a fixmap entry */
-extern void set_fixmap(unsigned map, unsigned long mfn, unsigned attributes);
+extern void set_fixmap(unsigned map, mfn_t mfn, unsigned attributes);
 /* Remove a mapping from a fixmap entry */
 extern void clear_fixmap(unsigned map);
 /* map a physical range in virtual memory */
@@ -193,10 +220,8 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 })
 
 /* Convert between machine frame numbers and page-info structures. */
-#define mfn_to_page(mfn)  (frame_table + (pfn_to_pdx(mfn) - frametable_base_pdx))
-#define page_to_mfn(pg)   pdx_to_pfn((unsigned long)((pg) - frame_table) + frametable_base_pdx)
-#define __page_to_mfn(pg)  page_to_mfn(pg)
-#define __mfn_to_page(mfn) mfn_to_page(mfn)
+#define __mfn_to_page(mfn)  (frame_table + (pfn_to_pdx(mfn) - frametable_base_pdx))
+#define __page_to_mfn(pg)   pdx_to_pfn((unsigned long)((pg) - frame_table) + frametable_base_pdx)
 
 /* Convert between machine addresses and page-info structures. */
 #define maddr_to_page(ma) __mfn_to_page((ma) >> PAGE_SHIFT)
@@ -206,6 +231,10 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 #define pfn_to_paddr(pfn) ((paddr_t)(pfn) << PAGE_SHIFT)
 #define paddr_to_pfn(pa)  ((unsigned long)((pa) >> PAGE_SHIFT))
 #define paddr_to_pdx(pa)    pfn_to_pdx(paddr_to_pfn(pa))
+#define gfn_to_gaddr(gfn)   pfn_to_paddr(gfn_x(gfn))
+#define gaddr_to_gfn(ga)    _gfn(paddr_to_pfn(ga))
+#define mfn_to_maddr(mfn)   pfn_to_paddr(mfn_x(mfn))
+#define maddr_to_mfn(ma)    _mfn(paddr_to_pfn(ma))
 #define vmap_to_mfn(va)     paddr_to_pfn(virt_to_maddr((vaddr_t)va))
 #define vmap_to_page(va)    mfn_to_page(vmap_to_mfn(va))
 
@@ -223,7 +252,7 @@ static inline paddr_t __virt_to_maddr(vaddr_t va)
 static inline void *maddr_to_virt(paddr_t ma)
 {
     ASSERT(is_xen_heap_mfn(ma >> PAGE_SHIFT));
-    ma -= pfn_to_paddr(xenheap_mfn_start);
+    ma -= mfn_to_maddr(xenheap_mfn_start);
     return (void *)(unsigned long) ma + XENHEAP_VIRT_START;
 }
 #else
@@ -231,17 +260,22 @@ static inline void *maddr_to_virt(paddr_t ma)
 {
     ASSERT(pfn_to_pdx(ma >> PAGE_SHIFT) < (DIRECTMAP_SIZE >> PAGE_SHIFT));
     return (void *)(XENHEAP_VIRT_START -
-                    pfn_to_paddr(xenheap_mfn_start) +
+                    mfn_to_maddr(xenheap_mfn_start) +
                     ((ma & ma_va_bottom_mask) |
                      ((ma & ma_top_mask) >> pfn_pdx_hole_shift)));
 }
 #endif
 
-static inline int gvirt_to_maddr(vaddr_t va, paddr_t *pa, unsigned int flags)
+/*
+ * Translate a guest virtual address to a machine address.
+ * Return the fault information if the translation has failed else 0.
+ */
+static inline uint64_t gvirt_to_maddr(vaddr_t va, paddr_t *pa,
+                                      unsigned int flags)
 {
     uint64_t par = gva_to_ma_par(va, flags);
     if ( par & PAR_F )
-        return -EFAULT;
+        return par;
     *pa = (par & PADDR_MASK & PAGE_MASK) | ((unsigned long) va & ~PAGE_MASK);
     return 0;
 }
@@ -251,9 +285,18 @@ static inline int gvirt_to_maddr(vaddr_t va, paddr_t *pa, unsigned int flags)
 #define __va(x)             (maddr_to_virt(x))
 
 /* Convert between Xen-heap virtual addresses and machine frame numbers. */
-#define virt_to_mfn(va)   (virt_to_maddr(va) >> PAGE_SHIFT)
-#define mfn_to_virt(mfn)  (maddr_to_virt((paddr_t)(mfn) << PAGE_SHIFT))
+#define __virt_to_mfn(va) (virt_to_maddr(va) >> PAGE_SHIFT)
+#define __mfn_to_virt(mfn) (maddr_to_virt((paddr_t)(mfn) << PAGE_SHIFT))
 
+/*
+ * We define non-underscored wrappers for above conversion functions.
+ * These are overriden in various source files while underscored version
+ * remain intact.
+ */
+#define mfn_to_page(mfn)    __mfn_to_page(mfn)
+#define page_to_mfn(pg)     __page_to_mfn(pg)
+#define virt_to_mfn(va)     __virt_to_mfn(va)
+#define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
 
 /* Convert between Xen-heap virtual addresses and page-info structures. */
 static inline struct page_info *virt_to_page(const void *v)
@@ -265,7 +308,7 @@ static inline struct page_info *virt_to_page(const void *v)
     ASSERT(va < xenheap_virt_end);
 
     pdx = (va - XENHEAP_VIRT_START) >> PAGE_SHIFT;
-    pdx += pfn_to_pdx(xenheap_mfn_start);
+    pdx += pfn_to_pdx(mfn_x(xenheap_mfn_start));
     return frame_table + pdx - frametable_base_pdx;
 }
 
@@ -311,11 +354,6 @@ static inline int relinquish_shared_pages(struct domain *d)
 
 /* Arch-specific portion of memory_op hypercall. */
 long arch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg);
-
-int steal_page(
-    struct domain *d, struct page_info *page, unsigned int memflags);
-int donate_page(
-    struct domain *d, struct page_info *page, unsigned int memflags);
 
 #define domain_set_alloc_bitsize(d) ((void)0)
 #define domain_clamp_alloc_bitsize(d, b) (b)

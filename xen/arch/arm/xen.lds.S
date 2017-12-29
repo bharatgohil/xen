@@ -52,6 +52,8 @@ SECTIONS
        __stop_bug_frames_2 = .;
        *(.rodata)
        *(.rodata.*)
+       *(.data.rel.ro)
+       *(.data.rel.ro.*)
 
 #ifdef CONFIG_LOCK_PROFILE
        . = ALIGN(POINTER_ALIGN);
@@ -59,6 +61,10 @@ SECTIONS
        *(.lockprofile.data)
        __lock_profile_end = .;
 #endif
+       . = ALIGN(POINTER_ALIGN);
+       __param_start = .;
+       *(.data.param)
+       __param_end = .;
   } :text
 
 #if defined(BUILD_ID)
@@ -97,8 +103,6 @@ SECTIONS
        __stop___pre_ex_table = .;
 
        *(.data.read_mostly)
-       *(.data.rel.ro)
-       *(.data.rel.ro.*)
   } :text
 
   . = ALIGN(8);

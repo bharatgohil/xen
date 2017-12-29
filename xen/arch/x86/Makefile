@@ -35,12 +35,12 @@ obj-y += i8259.o
 obj-y += io_apic.o
 obj-$(CONFIG_LIVEPATCH) += alternative.o livepatch.o
 obj-y += msi.o
+obj-y += msr.o
 obj-y += ioport_emulate.o
 obj-y += irq.o
 obj-$(CONFIG_KEXEC) += machine_kexec.o
 obj-y += microcode_amd.o
 obj-y += microcode_intel.o
-# This must come after the vendor specific files.
 obj-y += microcode.o
 obj-y += mm.o x86_64/mm.o
 obj-y += monitor.o
@@ -90,8 +90,11 @@ else
 all_symbols =
 endif
 
+syms-warn-dup-y := --warn-dup
+syms-warn-dup-$(CONFIG_SUPPRESS_DUPLICATE_SYMBOL_WARNINGS) :=
+
 $(TARGET): $(TARGET)-syms $(efi-y) boot/mkelf32
-	./boot/mkelf32 $(notes_phdrs) $(TARGET)-syms $(TARGET) 0x100000 \
+	./boot/mkelf32 $(notes_phdrs) $(TARGET)-syms $(TARGET) $(XEN_IMG_OFFSET) \
 	               `$(NM) $(TARGET)-syms | sed -ne 's/^\([^ ]*\) . __2M_rwdata_end$$/0x\1/p'`
 
 ALL_OBJS := $(BASEDIR)/arch/x86/boot/built_in.o $(BASEDIR)/arch/x86/efi/built_in.o $(ALL_OBJS)
@@ -131,7 +134,7 @@ $(TARGET)-syms: prelink.o xen.lds $(BASEDIR)/common/symbols-dummy.o
 	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o $(build_id_linker) \
 	    $(@D)/.$(@F).0.o -o $(@D)/.$(@F).1
 	$(NM) -pa --format=sysv $(@D)/.$(@F).1 \
-		| $(BASEDIR)/tools/symbols $(all_symbols) --sysv --sort --warn-dup \
+		| $(BASEDIR)/tools/symbols $(all_symbols) --sysv --sort $(syms-warn-dup-y) \
 		>$(@D)/.$(@F).1.S
 	$(MAKE) -f $(BASEDIR)/Rules.mk $(@D)/.$(@F).1.o
 	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o $(build_id_linker) \

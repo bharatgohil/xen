@@ -166,18 +166,24 @@ S:	Supported
 L:	xen-devel@lists.xen.org
 F:	docs/misc/arm/
 F:	xen/arch/arm/
-F:	xen/include/asm-arm/
-F:	xen/drivers/char/cadence-uart.c
 F:	xen/drivers/char/arm-uart.c
+F:	xen/drivers/char/cadence-uart.c
 F:	xen/drivers/char/exynos4210-uart.c
 F:	xen/drivers/char/omap-uart.c
 F:	xen/drivers/char/pl011.c
 F:	xen/drivers/char/scif-uart.c
 F:	xen/drivers/passthrough/arm/
+F:	xen/include/asm-arm/
+F:	xen/include/public/arch-arm/
+F:	xen/include/public/arch-arm.h
+
+BLKTAP2
+S:	Orphaned
+F:	tools/blktap2/
 
 CPU POOLS
 M:	Juergen Gross <jgross@suse.com>
-M:	Dario Faggioli <dario.faggioli@citrix.com>
+M:	Dario Faggioli <raistlin@linux.it>
 S:	Supported
 F:	xen/common/cpupool.c
 
@@ -322,8 +328,6 @@ M:	Shriram Rajagopalan <rshriram@cs.ubc.ca>
 M:	Yang Hongyang <imhy.yang@gmail.com>
 S:	Maintained
 F:	docs/README.remus
-F:	tools/blktap2/drivers/block-remus.c
-F:	tools/blktap2/drivers/hashtable*
 F:	tools/libxl/libxl_remus_*
 F:	tools/libxl/libxl_netbuffer.c
 F:	tools/libxl/libxl_nonetbuffer.c
@@ -331,14 +335,14 @@ F:	tools/hotplug/Linux/remus-netbuf-setup
 F:	tools/hotplug/Linux/block-drbd-probe
 
 RTDS SCHEDULER
-M:	Dario Faggioli <dario.faggioli@citrix.com>
+M:	Dario Faggioli <raistlin@linux.it>
 M:	Meng Xu <mengxu@cis.upenn.edu>
 S:	Supported
 F:	xen/common/sched_rt.c
 
 SCHEDULING
 M:	George Dunlap <george.dunlap@eu.citrix.com>
-M:	Dario Faggioli <dario.faggioli@citrix.com>
+M:	Dario Faggioli <raistlin@linux.it>
 S:	Supported
 F:	xen/common/sched*
 
@@ -407,6 +411,7 @@ F:	xen/arch/*/vm_event.c
 F:	xen/arch/arm/mem_access.c
 F:	xen/arch/x86/mm/mem_access.c
 F:	xen/arch/x86/hvm/monitor.c
+F:	xen/arch/x88/hvm/vm_event.c
 F:	xen/common/mem_access.c
 F:	xen/common/monitor.c
 F:	xen/common/vm_event.c
@@ -414,16 +419,17 @@ F:	xen/include/*/mem_access.h
 F:	xen/include/*/monitor.h
 F:	xen/include/*/vm_event.h
 F:	xen/include/asm-x86/hvm/monitor.h
+F:	xen/include/asm-x86/hvm/vm_event.h
 
 VTPM
 M:	Daniel De Graaf <dgdegra@tycho.nsa.gov>
-M:	Quan Xu <xuquan8@huawei.com>
+M:	Quan Xu <quan.xu0@gmail.com>
 S:	Supported
 F:	extras/mini-os/tpm*
 F:	extras/mini-os/include/tpm*
 F:	stubdom/vtpm/
 F:	stubdom/vtpmmgr/
-F:	docs/misc/vtpm.txt
+F:	docs/misc/vtpm-platforms.txt
 
 X86 ARCHITECTURE
 M:	Jan Beulich <jbeulich@suse.com>
@@ -432,8 +438,12 @@ S:	Supported
 L:	xen-devel@lists.xen.org
 F:	xen/arch/x86/
 F:	xen/include/asm-x86/
+F:	xen/include/public/arch-x86/
 F:	tools/firmware/hvmloader/
+F:	tools/firmware/rombios/
+F:	tools/firmware/vgabios/
 F:	tools/tests/x86_emulator/
+F:	tools/fuzz/x86_instruction_emulator/
 
 X86 I/O EMULATION
 M:	Paul Durrant <paul.durrant@citrix.com>

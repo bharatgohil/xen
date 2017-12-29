@@ -5,10 +5,10 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-MAJOR = 4.9
+MAJOR = 4.10
 MINOR = 0
 
-XLUMAJOR = 4.9
+XLUMAJOR = 4.10
 XLUMINOR = 0
 
 CFLAGS += -Werror -Wno-format-zero-length -Wmissing-declarations \
@@ -20,12 +20,13 @@ LIBUUID_LIBS += -luuid
 endif
 
 LIBXL_LIBS =
-LIBXL_LIBS = $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxenstore) $(LDLIBS_libblktapctl) $(PTYFUNCS_LIBS) $(LIBUUID_LIBS)
+LIBXL_LIBS = $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxenstore) $(LDLIBS_libblktapctl) $(LDLIBS_libxentoolcore) $(PTYFUNCS_LIBS) $(LIBUUID_LIBS)
 ifeq ($(CONFIG_LIBNL),y)
 LIBXL_LIBS += $(LIBNL3_LIBS)
 endif
 
 CFLAGS_LIBXL += $(CFLAGS_libxentoollog)
+CFLAGS_LIBXL += $(CFLAGS_libxentoolcore)
 CFLAGS_LIBXL += $(CFLAGS_libxenevtchn)
 CFLAGS_LIBXL += $(CFLAGS_libxenctrl)
 CFLAGS_LIBXL += $(CFLAGS_libxenguest)
@@ -46,7 +47,7 @@ LIBXL_LIBS += $(LIBXL_LIBS-y)
 LIBXLU_LIBS = $(LDLIBS_libxenlight)
 
 LIBXL_OBJS-y = osdeps.o libxl_paths.o libxl_bootloader.o flexarray.o
-ifeq ($(LIBXL_BLKTAP),y)
+ifeq ($(CONFIG_BLKTAP2),y)
 LIBXL_OBJS-y += libxl_blktap2.o
 else
 LIBXL_OBJS-y += libxl_noblktap2.o
@@ -138,7 +139,7 @@ LIBXL_OBJS = flexarray.o libxl.o libxl_create.o libxl_dm.o libxl_pci.o \
 			libxl_dom_suspend.o libxl_dom_save.o libxl_usb.o \
 			libxl_vtpm.o libxl_nic.o libxl_disk.o libxl_console.o \
 			libxl_cpupool.o libxl_mem.o libxl_sched.o libxl_tmem.o \
-			libxl_domain.o \
+			libxl_9pfs.o libxl_domain.o libxl_vdispl.o \
                         $(LIBXL_OBJS-y)
 LIBXL_OBJS += libxl_genid.o
 LIBXL_OBJS += _libxl_types.o libxl_flask.o _libxl_types_internal.o
@@ -178,7 +179,7 @@ LIBXLU_OBJS = libxlu_cfg_y.o libxlu_cfg_l.o libxlu_cfg.o \
 	libxlu_disk_l.o libxlu_disk.o libxlu_vif.o libxlu_pci.o
 $(LIBXLU_OBJS): CFLAGS += $(CFLAGS_libxenctrl) # For xentoollog.h
 
-$(TEST_PROG_OBJS) _libxl.api-for-check: CFLAGS += $(CFLAGS_libxentoollog)
+$(TEST_PROG_OBJS) _libxl.api-for-check: CFLAGS += $(CFLAGS_libxentoollog) $(CFLAGS_libxentoolcore)
 
 CLIENTS = testidl libxl-save-helper
 
@@ -301,13 +302,13 @@ libxlutil.a: $(LIBXLU_OBJS)
 	$(AR) rcs libxlutil.a $^
 
 test_%: test_%.o test_common.o libxlutil.so libxenlight_test.so
-	$(CC) $(LDFLAGS) -o $@ $^ $(filter-out %libxenlight.so, $(LDLIBS_libxenlight)) $(LDLIBS_libxentoollog) -lyajl $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(filter-out %libxenlight.so, $(LDLIBS_libxenlight)) $(LDLIBS_libxentoollog) $(LDLIBS_libxentoolcore) -lyajl $(APPEND_LDFLAGS)
 
 libxl-save-helper: $(SAVE_HELPER_OBJS) libxenlight.so
-	$(CC) $(LDFLAGS) -o $@ $(SAVE_HELPER_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ $(SAVE_HELPER_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxentoolcore) $(APPEND_LDFLAGS)
 
 testidl: testidl.o libxlutil.so libxenlight.so
-	$(CC) $(LDFLAGS) -o $@ testidl.o libxlutil.so $(LDLIBS_libxenlight) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ testidl.o libxlutil.so $(LDLIBS_libxenlight) $(LDLIBS_libxentoollog) $(LDLIBS_libxentoolcore) $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: all
@@ -327,9 +328,23 @@ install: all
 	$(INSTALL_DATA) xenlight.pc $(DESTDIR)$(PKG_INSTALLDIR)
 	$(INSTALL_DATA) xlutil.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(PKG_INSTALLDIR)/,xlutil.pc xenlight.pc)
+	rm -f $(addprefix $(DESTDIR)$(includedir)/,libxl.h libxl_event.h libxl_json.h _libxl_types.h _libxl_types_json.h _libxl_list.h libxl_utils.h libxl_uuid.h libxlutil.h)
+	rm -f $(DESTDIR)$(libdir)/libxlutil.a
+	rm -f $(DESTDIR)$(libdir)/libxlutil.so
+	rm -f $(DESTDIR)$(libdir)/libxlutil.so.$(XLUMAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxlutil.so.$(XLUMAJOR).$(XLUMINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenlight.a
+	rm -f $(DESTDIR)$(libdir)/libxenlight.so
+	rm -f $(DESTDIR)$(libdir)/libxenlight.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenlight.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/libxl-save-helper
+
 .PHONY: clean
 clean:
-	$(RM) -f _*.h *.o *.so* *.a $(CLIENTS) $(DEPS)
+	$(RM) -f _*.h *.o *.so* *.a $(CLIENTS) $(DEPS_RM)
 	$(RM) -f _*.c *.pyc _paths.*.tmp _*.api-for-check
 	$(RM) -f testidl.c.new testidl.c *.api-ok
 	$(RM) -f xenlight.pc
@@ -341,4 +356,4 @@ distclean: clean
 realclean: distclean
 	$(RM) -f $(AUTOSRCS) $(AUTOINCS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

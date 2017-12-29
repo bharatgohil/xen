@@ -22,30 +22,6 @@
 #include <assert.h>
 #include <xen/tmem.h>
 
-static int do_tmem_op(xc_interface *xch, tmem_op_t *op)
-{
-    int ret;
-    DECLARE_HYPERCALL_BOUNCE(op, sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-
-    if ( xc_hypercall_bounce_pre(xch, op) )
-    {
-        PERROR("Could not bounce buffer for tmem op hypercall");
-        return -EFAULT;
-    }
-
-    ret = xencall1(xch->xcall, __HYPERVISOR_tmem_op,
-                   HYPERCALL_BUFFER_AS_ARG(op));
-    if ( ret < 0 )
-    {
-        if ( errno == EACCES )
-            DPRINTF("tmem operation failed -- need to"
-                    " rebuild the user-space tool set?\n");
-    }
-    xc_hypercall_bounce_post(xch, op);
-
-    return ret;
-}
-
 int xc_tmem_control(xc_interface *xch,
                     int32_t pool_id,
                     uint32_t cmd,
@@ -69,7 +45,8 @@ int xc_tmem_control(xc_interface *xch,
     sysctl.u.tmem_op.oid.oid[1] = 0;
     sysctl.u.tmem_op.oid.oid[2] = 0;
 
-    if ( cmd == XEN_SYSCTL_TMEM_OP_SET_CLIENT_INFO )
+    if ( cmd == XEN_SYSCTL_TMEM_OP_SET_CLIENT_INFO ||
+         cmd == XEN_SYSCTL_TMEM_OP_SET_AUTH )
         HYPERCALL_BOUNCE_SET_DIR(buf, XC_HYPERCALL_BUFFER_BOUNCE_IN);
     if ( len )
     {
@@ -161,9 +138,9 @@ static int xc_tmem_uuid_parse(char *uuid_str, uint64_t *uuid_lo, uint64_t *uuid_
         else if ( *p >= '0' && *p <= '9' )
             digit = *p - '0';
         else if ( *p >= 'A' && *p <= 'F' )
-            digit = *p - 'A';
+            digit = *p - 'A' + 10;
         else if ( *p >= 'a' && *p <= 'f' )
-            digit = *p - 'a';
+            digit = *p - 'a' + 10;
         else
             return -1;
         *x = (*x << 4) | digit;
@@ -176,22 +153,25 @@ static int xc_tmem_uuid_parse(char *uuid_str, uint64_t *uuid_lo, uint64_t *uuid_
 int xc_tmem_auth(xc_interface *xch,
                  int cli_id,
                  char *uuid_str,
-                 int arg1)
+                 int enable)
 {
-    tmem_op_t op;
-
-    op.cmd = TMEM_AUTH;
-    op.pool_id = 0;
-    op.u.creat.arg1 = cli_id;
-    op.u.creat.flags = arg1;
-    if ( xc_tmem_uuid_parse(uuid_str, &op.u.creat.uuid[0],
-                                      &op.u.creat.uuid[1]) < 0 )
+    xen_tmem_pool_info_t pool = {
+        .flags.u.auth = enable,
+        .id = 0,
+        .n_pages = 0,
+        .uuid[0] = 0,
+        .uuid[1] = 0,
+    };
+    if ( xc_tmem_uuid_parse(uuid_str, &pool.uuid[0],
+                                      &pool.uuid[1]) < 0 )
     {
         PERROR("Can't parse uuid, use xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx");
         return -1;
     }
-
-    return do_tmem_op(xch, &op);
+    return xc_tmem_control(xch, 0 /* pool_id */,
+                           XEN_SYSCTL_TMEM_OP_SET_AUTH,
+                           cli_id, sizeof(pool),
+                           0 /* arg */, &pool);
 }
 
 /* Save/restore/live migrate */
@@ -211,7 +191,7 @@ int xc_tmem_auth(xc_interface *xch,
 
 /* returns 0 if nothing to save, -1 if error saving, 1 if saved successfully */
 int xc_tmem_save(xc_interface *xch,
-                 int dom, int io_fd, int live, int field_marker)
+                 uint32_t domid, int io_fd, int live, int field_marker)
 {
     int marker = field_marker;
     int i, j, rc;
@@ -222,7 +202,7 @@ int xc_tmem_save(xc_interface *xch,
     char *buf = NULL;
 
     rc = xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_BEGIN,
-                         dom, 0 /* len*/ , live, NULL);
+                         domid, 0 /* len*/ , live, NULL);
     if ( rc )
     {
         /* Nothing to save - no tmem enabled. */
@@ -234,7 +214,7 @@ int xc_tmem_save(xc_interface *xch,
 
     if ( xc_tmem_control(xch, 0 /* pool_id */,
                          XEN_SYSCTL_TMEM_OP_GET_CLIENT_INFO,
-                         dom /* cli_id */, sizeof(info), 0 /* arg */,
+                         domid /* cli_id */, sizeof(info), 0 /* arg */,
                          &info) < 0 )
         return -1;
 
@@ -248,7 +228,7 @@ int xc_tmem_save(xc_interface *xch,
 
     rc = xc_tmem_control(xch, 0 /* pool_id is ignored. */,
                          XEN_SYSCTL_TMEM_OP_GET_POOLS,
-                         dom /* cli_id */, sizeof(*pools) * info.nr_pools,
+                         domid /* cli_id */, sizeof(*pools) * info.nr_pools,
                          0 /* arg */, pools);
 
     if ( rc < 0 || (uint32_t)rc > info.nr_pools )
@@ -294,9 +274,9 @@ int xc_tmem_save(xc_interface *xch,
             for ( j = pool->n_pages; j > 0; j-- )
             {
                 int ret;
-                if ( (ret = xc_tmem_control(xch, pool->id,
-                                            XEN_SYSCTL_TMEM_OP_SAVE_GET_NEXT_PAGE, dom,
-                                            bufsize, 0, buf)) > 0 )
+                if ( (ret = xc_tmem_control(
+                          xch, pool->id, XEN_SYSCTL_TMEM_OP_SAVE_GET_NEXT_PAGE,
+                          domid, bufsize, 0, buf)) > 0 )
                 {
                     h = (struct tmem_handle *)buf;
                     if ( write_exact(io_fd, &h->oid, sizeof(h->oid)) )
@@ -325,7 +305,7 @@ int xc_tmem_save(xc_interface *xch,
                 }
             }
             DPRINTF("saved %"PRId64" tmem pages for dom=%d pool=%d, checksum=%x\n",
-                    pool->n_pages - j, dom, pool->id, checksum);
+                    pool->n_pages - j, domid, pool->id, checksum);
         }
     }
     free(pools);
@@ -340,7 +320,7 @@ int xc_tmem_save(xc_interface *xch,
 }
 
 /* only called for live migration */
-int xc_tmem_save_extra(xc_interface *xch, int dom, int io_fd, int field_marker)
+int xc_tmem_save_extra(xc_interface *xch, uint32_t domid, int io_fd, int field_marker)
 {
     struct tmem_handle handle;
     int marker = field_marker;
@@ -349,7 +329,7 @@ int xc_tmem_save_extra(xc_interface *xch, int dom, int io_fd, int field_marker)
 
     if ( write_exact(io_fd, &marker, sizeof(marker)) )
         return -1;
-    while ( xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_GET_NEXT_INV, dom,
+    while ( xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_GET_NEXT_INV, domid,
                             sizeof(handle),0,&handle) > 0 ) {
         if ( write_exact(io_fd, &handle.pool_id, sizeof(handle.pool_id)) )
             return -1;
@@ -370,9 +350,9 @@ int xc_tmem_save_extra(xc_interface *xch, int dom, int io_fd, int field_marker)
 }
 
 /* only called for live migration */
-void xc_tmem_save_done(xc_interface *xch, int dom)
+void xc_tmem_save_done(xc_interface *xch, uint32_t domid)
 {
-    xc_tmem_control(xch,0,XEN_SYSCTL_TMEM_OP_SAVE_END,dom,0,0,NULL);
+    xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_END, domid, 0, 0, NULL);
 }
 
 /* restore routines */
@@ -385,19 +365,21 @@ static int xc_tmem_restore_new_pool(
                     uint64_t uuid_lo,
                     uint64_t uuid_hi)
 {
-    tmem_op_t op;
+    xen_tmem_pool_info_t pool = {
+        .flags.raw = flags,
+        .id = pool_id,
+        .n_pages = 0,
+        .uuid[0] = uuid_lo,
+        .uuid[1] = uuid_hi,
+    };
 
-    op.cmd = TMEM_RESTORE_NEW;
-    op.pool_id = pool_id;
-    op.u.creat.arg1 = cli_id;
-    op.u.creat.flags = flags;
-    op.u.creat.uuid[0] = uuid_lo;
-    op.u.creat.uuid[1] = uuid_hi;
-
-    return do_tmem_op(xch, &op);
+    return xc_tmem_control(xch, pool_id,
+                           XEN_SYSCTL_TMEM_OP_SET_POOLS,
+                           cli_id, sizeof(pool),
+                           0 /* arg */, &pool);
 }
 
-int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
+int xc_tmem_restore(xc_interface *xch, uint32_t domid, int io_fd)
 {
     uint32_t minusone;
     xen_tmem_client_t info;
@@ -412,12 +394,12 @@ int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
     if ( !info.nr_pools )
         return -1;
 
-    if ( xc_tmem_control(xch,0,XEN_SYSCTL_TMEM_OP_RESTORE_BEGIN,dom,0,0,NULL) < 0 )
+    if ( xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_RESTORE_BEGIN, domid, 0, 0, NULL) < 0 )
         return -1;
 
     if ( xc_tmem_control(xch, 0 /* pool_id */,
                          XEN_SYSCTL_TMEM_OP_SET_CLIENT_INFO,
-                         dom /* cli_id */, sizeof(info), 0 /* arg */,
+                         domid /* cli_id */, sizeof(info), 0 /* arg */,
                          &info) < 0 )
         return -1;
 
@@ -433,7 +415,7 @@ int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
         if ( read_exact(io_fd, &pool, sizeof(pool)) )
             goto out_memory;
 
-        if ( xc_tmem_restore_new_pool(xch, dom, pool.id, pool.flags.raw,
+        if ( xc_tmem_restore_new_pool(xch, domid, pool.id, pool.flags.raw,
                                       pool.uuid[0], pool.uuid[1]) < 0 )
             goto out_memory;
 
@@ -465,9 +447,9 @@ int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
                 goto out_memory;
 
             checksum += *buf;
-            if ( (rc = xc_tmem_control_oid(xch, pool.id,
-                                           XEN_SYSCTL_TMEM_OP_RESTORE_PUT_PAGE, dom,
-                                           bufsize, index, oid, buf)) <= 0 )
+            if ( (rc = xc_tmem_control_oid(
+                      xch, pool.id, XEN_SYSCTL_TMEM_OP_RESTORE_PUT_PAGE,
+                      domid, bufsize, index, oid, buf)) <= 0 )
             {
                 DPRINTF("xc_tmem_restore: putting page failed, rc=%d\n",rc);
  out_memory:
@@ -477,7 +459,7 @@ int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
         }
         if ( pool.n_pages )
             DPRINTF("restored %"PRId64" tmem pages for dom=%d pool=%d, check=%x\n",
-                    pool.n_pages - j, dom, pool.id, checksum);
+                    pool.n_pages - j, domid, pool.id, checksum);
     }
     free(buf);
 
@@ -485,7 +467,7 @@ int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
 }
 
 /* only called for live migration, must be called after suspend */
-int xc_tmem_restore_extra(xc_interface *xch, int dom, int io_fd)
+int xc_tmem_restore_extra(xc_interface *xch, uint32_t domid, int io_fd)
 {
     uint32_t pool_id;
     struct xen_tmem_oid oid;
@@ -499,8 +481,9 @@ int xc_tmem_restore_extra(xc_interface *xch, int dom, int io_fd)
             return -1;
         if ( read_exact(io_fd, &index, sizeof(index)) )
             return -1;
-        if ( xc_tmem_control_oid(xch, pool_id, XEN_SYSCTL_TMEM_OP_RESTORE_FLUSH_PAGE, dom,
-                             0,index,oid,NULL) <= 0 )
+        if ( xc_tmem_control_oid(
+                 xch, pool_id, XEN_SYSCTL_TMEM_OP_RESTORE_FLUSH_PAGE,
+                 domid, 0, index, oid, NULL) <= 0 )
             return -1;
         count++;
         checksum += pool_id + oid.oid[0] + oid.oid[1] + oid.oid[2] + index;

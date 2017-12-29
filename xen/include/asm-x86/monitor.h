@@ -33,6 +33,12 @@ struct monitor_msr_bitmap {
 };
 
 static inline
+void arch_monitor_allow_userspace(struct domain *d, bool allow_userspace)
+{
+    d->arch.monitor.guest_request_userspace_enabled = allow_userspace;
+}
+
+static inline
 int arch_monitor_domctl_op(struct domain *d, struct xen_domctl_monitor_op *mop)
 {
     int rc = 0;
@@ -77,11 +83,15 @@ static inline uint32_t arch_monitor_get_capabilities(struct domain *d)
                    (1U << XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST) |
                    (1U << XEN_DOMCTL_MONITOR_EVENT_DEBUG_EXCEPTION) |
                    (1U << XEN_DOMCTL_MONITOR_EVENT_CPUID) |
-                   (1U << XEN_DOMCTL_MONITOR_EVENT_INTERRUPT);
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_INTERRUPT) |
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_EMUL_UNIMPLEMENTED);
 
     /* Since we know this is on VMX, we can just call the hvm func */
     if ( hvm_is_singlestep_supported() )
         capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP);
+
+    if ( hvm_funcs.set_descriptor_access_exiting )
+        capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_DESC_ACCESS);
 
     return capabilities;
 }
@@ -93,6 +103,6 @@ int arch_monitor_init_domain(struct domain *d);
 
 void arch_monitor_cleanup_domain(struct domain *d);
 
-bool_t monitored_msr(const struct domain *d, u32 msr);
+bool monitored_msr(const struct domain *d, u32 msr);
 
 #endif /* __ASM_X86_MONITOR_H__ */

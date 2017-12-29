@@ -14,6 +14,7 @@
 #include <xen/sched-if.h>
 #include <xen/domain.h>
 #include <xen/event.h>
+#include <xen/grant_table.h>
 #include <xen/domain_page.h>
 #include <xen/trace.h>
 #include <xen/console.h>
@@ -243,7 +244,7 @@ void domctl_lock_release(void)
 }
 
 static inline
-int vcpuaffinity_params_invalid(const xen_domctl_vcpuaffinity_t *vcpuaff)
+int vcpuaffinity_params_invalid(const struct xen_domctl_vcpuaffinity *vcpuaff)
 {
     return vcpuaff->flags == 0 ||
            ((vcpuaff->flags & XEN_VCPUAFFINITY_HARD) &&
@@ -391,11 +392,15 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     switch ( op->cmd )
     {
-    case XEN_DOMCTL_createdomain:
     case XEN_DOMCTL_test_assign_device:
+        if ( op->domain == DOMID_INVALID )
+        {
+    case XEN_DOMCTL_createdomain:
     case XEN_DOMCTL_gdbsx_guestmemio:
-        d = NULL;
-        break;
+            d = NULL;
+            break;
+        }
+        /* fall through */
     default:
         d = rcu_lock_domain_by_id(op->domain);
         if ( !d && op->cmd != XEN_DOMCTL_getdomaininfo )
@@ -686,7 +691,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     case XEN_DOMCTL_getvcpuaffinity:
     {
         struct vcpu *v;
-        xen_domctl_vcpuaffinity_t *vcpuaff = &op->u.vcpuaffinity;
+        struct xen_domctl_vcpuaffinity *vcpuaff = &op->u.vcpuaffinity;
 
         ret = -EINVAL;
         if ( vcpuaff->vcpu >= d->max_vcpus )
@@ -703,7 +708,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         if ( op->cmd == XEN_DOMCTL_setvcpuaffinity )
         {
             cpumask_var_t new_affinity, old_affinity;
-            cpumask_t *online = cpupool_domain_cpumask(v->domain);;
+            cpumask_t *online = cpupool_domain_cpumask(v->domain);
 
             /*
              * We want to be able to restore hard affinity if we are trying
@@ -864,7 +869,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
                      < sizeof(struct compat_vcpu_guest_context));
 #endif
         ret = -ENOMEM;
-        if ( (c.nat = xmalloc(struct vcpu_guest_context)) == NULL )
+        if ( (c.nat = xzalloc(struct vcpu_guest_context)) == NULL )
             goto getvcpucontext_out;
 
         vcpu_pause(v);
@@ -1071,8 +1076,11 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             break;
         }
 
-        ret = xsm_set_target(XSM_HOOK, d, e);
-        if ( ret ) {
+        ret = -EOPNOTSUPP;
+        if ( is_hvm_domain(e) )
+            ret = xsm_set_target(XSM_HOOK, d, e);
+        if ( ret )
+        {
             put_domain(e);
             break;
         }
@@ -1140,6 +1148,11 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         ret = monitor_domctl(d, &op->u.monitor_op);
         if ( !ret )
             copyback = 1;
+        break;
+
+    case XEN_DOMCTL_set_gnttab_limits:
+        ret = grant_table_set_limits(d, op->u.set_gnttab_limits.grant_frames,
+                                     op->u.set_gnttab_limits.maptrack_frames);
         break;
 
     default:

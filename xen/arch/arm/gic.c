@@ -148,6 +148,7 @@ int gic_route_irq_to_guest(struct domain *d, unsigned int virq,
     /* Caller has already checked that the IRQ is an SPI */
     ASSERT(virq >= 32);
     ASSERT(virq < vgic_num_irqs(d));
+    ASSERT(!is_lpi(virq));
 
     vgic_lock_rank(v_target, rank, flags);
 
@@ -184,6 +185,7 @@ int gic_remove_irq_from_guest(struct domain *d, unsigned int virq,
     ASSERT(spin_is_locked(&desc->lock));
     ASSERT(test_bit(_IRQ_GUEST, &desc->status));
     ASSERT(p->desc == desc);
+    ASSERT(!is_lpi(virq));
 
     vgic_lock_rank(v_target, rank, flags);
 
@@ -373,6 +375,8 @@ static inline void gic_set_lr(int lr, struct pending_irq *p,
 {
     ASSERT(!local_irq_is_enabled());
 
+    clear_bit(GIC_IRQ_GUEST_PRISTINE_LPI, &p->status);
+
     gic_hw_ops->update_lr(lr, p, state);
 
     set_bit(GIC_IRQ_GUEST_VISIBLE, &p->status);
@@ -400,22 +404,35 @@ static inline void gic_add_to_lr_pending(struct vcpu *v, struct pending_irq *n)
     list_add_tail(&n->lr_queue, &v->arch.vgic.lr_pending);
 }
 
-void gic_remove_from_queues(struct vcpu *v, unsigned int virtual_irq)
+void gic_remove_from_lr_pending(struct vcpu *v, struct pending_irq *p)
 {
-    struct pending_irq *p = irq_to_pending(v, virtual_irq);
-    unsigned long flags;
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
 
-    spin_lock_irqsave(&v->arch.vgic.lock, flags);
-    if ( !list_empty(&p->lr_queue) )
-        list_del_init(&p->lr_queue);
-    spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
+    list_del_init(&p->lr_queue);
+}
+
+void gic_remove_irq_from_queues(struct vcpu *v, struct pending_irq *p)
+{
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    clear_bit(GIC_IRQ_GUEST_QUEUED, &p->status);
+    list_del_init(&p->inflight);
+    gic_remove_from_lr_pending(v, p);
 }
 
 void gic_raise_inflight_irq(struct vcpu *v, unsigned int virtual_irq)
 {
     struct pending_irq *n = irq_to_pending(v, virtual_irq);
 
+    /* If an LPI has been removed meanwhile, there is nothing left to raise. */
+    if ( unlikely(!n) )
+        return;
+
     ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    /* Don't try to update the LR if the interrupt is disabled */
+    if ( !test_bit(GIC_IRQ_GUEST_ENABLED, &n->status) )
+        return;
 
     if ( list_empty(&n->lr_queue) )
     {
@@ -429,25 +446,65 @@ void gic_raise_inflight_irq(struct vcpu *v, unsigned int virtual_irq)
 #endif
 }
 
+/*
+ * Find an unused LR to insert an IRQ into, starting with the LR given
+ * by @lr. If this new interrupt is a PRISTINE LPI, scan the other LRs to
+ * avoid inserting the same IRQ twice. This situation can occur when an
+ * event gets discarded while the LPI is in an LR, and a new LPI with the
+ * same number gets mapped quickly afterwards.
+ */
+static unsigned int gic_find_unused_lr(struct vcpu *v,
+                                       struct pending_irq *p,
+                                       unsigned int lr)
+{
+    unsigned int nr_lrs = gic_hw_ops->info->nr_lrs;
+    unsigned long *lr_mask = (unsigned long *) &this_cpu(lr_mask);
+    struct gic_lr lr_val;
+
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    if ( unlikely(test_bit(GIC_IRQ_GUEST_PRISTINE_LPI, &p->status)) )
+    {
+        unsigned int used_lr;
+
+        for_each_set_bit(used_lr, lr_mask, nr_lrs)
+        {
+            gic_hw_ops->read_lr(used_lr, &lr_val);
+            if ( lr_val.virq == p->irq )
+                return used_lr;
+        }
+    }
+
+    lr = find_next_zero_bit(lr_mask, nr_lrs, lr);
+
+    return lr;
+}
+
 void gic_raise_guest_irq(struct vcpu *v, unsigned int virtual_irq,
         unsigned int priority)
 {
     int i;
     unsigned int nr_lrs = gic_hw_ops->info->nr_lrs;
+    struct pending_irq *p = irq_to_pending(v, virtual_irq);
 
     ASSERT(spin_is_locked(&v->arch.vgic.lock));
 
+    if ( unlikely(!p) )
+        /* An unmapped LPI does not need to be raised. */
+        return;
+
     if ( v == current && list_empty(&v->arch.vgic.lr_pending) )
     {
-        i = find_first_zero_bit(&this_cpu(lr_mask), nr_lrs);
+        i = gic_find_unused_lr(v, p, 0);
+
         if (i < nr_lrs) {
             set_bit(i, &this_cpu(lr_mask));
-            gic_set_lr(i, irq_to_pending(v, virtual_irq), GICH_LR_PENDING);
+            gic_set_lr(i, p, GICH_LR_PENDING);
             return;
         }
     }
 
-    gic_add_to_lr_pending(v, irq_to_pending(v, virtual_irq));
+    gic_add_to_lr_pending(v, p);
 }
 
 static void gic_update_one_lr(struct vcpu *v, int i)
@@ -462,6 +519,23 @@ static void gic_update_one_lr(struct vcpu *v, int i)
     gic_hw_ops->read_lr(i, &lr_val);
     irq = lr_val.virq;
     p = irq_to_pending(v, irq);
+    /*
+     * An LPI might have been unmapped, in which case we just clean up here.
+     * If that LPI is marked as PRISTINE, the information in the LR is bogus,
+     * as it belongs to a previous, already unmapped LPI. So we discard it
+     * here as well.
+     */
+    if ( unlikely(!p ||
+                  test_and_clear_bit(GIC_IRQ_GUEST_PRISTINE_LPI, &p->status)) )
+    {
+        ASSERT(is_lpi(irq));
+
+        gic_hw_ops->clear_lr(i);
+        clear_bit(i, &this_cpu(lr_mask));
+
+        return;
+    }
+
     if ( lr_val.state & GICH_LR_ACTIVE )
     {
         set_bit(GIC_IRQ_GUEST_ACTIVE, &p->status);
@@ -503,10 +577,18 @@ static void gic_update_one_lr(struct vcpu *v, int i)
             gic_raise_guest_irq(v, irq, p->priority);
         else {
             list_del_init(&p->inflight);
-            if ( test_and_clear_bit(GIC_IRQ_GUEST_MIGRATING, &p->status) )
+            /*
+             * Remove from inflight, then change physical affinity. It
+             * makes sure that when a new interrupt is received on the
+             * next pcpu, inflight is already cleared. No concurrent
+             * accesses to inflight.
+             */
+            smp_wmb();
+            if ( test_bit(GIC_IRQ_GUEST_MIGRATING, &p->status) )
             {
                 struct vcpu *v_target = vgic_get_target_vcpu(v, irq);
                 irq_set_affinity(p->desc, cpumask_of(v_target->processor));
+                clear_bit(GIC_IRQ_GUEST_MIGRATING, &p->status);
             }
         }
     }
@@ -524,7 +606,7 @@ void gic_clear_lrs(struct vcpu *v)
     if ( is_idle_vcpu(v) )
         return;
 
-    gic_hw_ops->update_hcr_status(GICH_HCR_UIE, 0);
+    gic_hw_ops->update_hcr_status(GICH_HCR_UIE, false);
 
     spin_lock_irqsave(&v->arch.vgic.lock, flags);
 
@@ -554,7 +636,7 @@ static void gic_restore_pending_irqs(struct vcpu *v)
     inflight_r = &v->arch.vgic.inflight_irqs;
     list_for_each_entry_safe ( p, t, &v->arch.vgic.lr_pending, lr_queue )
     {
-        lr = find_next_zero_bit(&this_cpu(lr_mask), nr_lrs, lr);
+        lr = gic_find_unused_lr(v, p, lr);
         if ( lr >= nr_lrs )
         {
             /* No more free LRs: find a lower priority irq to evict */
@@ -601,7 +683,7 @@ void gic_clear_pending_irqs(struct vcpu *v)
 
     v->arch.lr_mask = 0;
     list_for_each_entry_safe ( p, t, &v->arch.vgic.lr_pending, lr_queue )
-        list_del_init(&p->lr_queue);
+        gic_remove_from_lr_pending(v, p);
 }
 
 int gic_events_need_delivery(void)
@@ -649,7 +731,7 @@ void gic_inject(void)
     gic_restore_pending_irqs(current);
 
     if ( !list_empty(&current->arch.vgic.lr_pending) && lr_all_full() )
-        gic_hw_ops->update_hcr_status(GICH_HCR_UIE, 1);
+        gic_hw_ops->update_hcr_status(GICH_HCR_UIE, true);
 }
 
 static void do_sgi(struct cpu_user_regs *regs, enum gic_sgi sgi)
@@ -697,7 +779,13 @@ void gic_interrupt(struct cpu_user_regs *regs, int is_fiq)
             do_IRQ(regs, irq, is_fiq);
             local_irq_disable();
         }
-        else if (unlikely(irq < 16))
+        else if ( is_lpi(irq) )
+        {
+            local_irq_enable();
+            gic_hw_ops->do_LPI(irq);
+            local_irq_disable();
+        }
+        else if ( unlikely(irq < 16) )
         {
             do_sgi(regs, irq);
         }
@@ -761,6 +849,18 @@ int gic_make_hwdom_dt_node(const struct domain *d,
 int gic_make_hwdom_madt(const struct domain *d, u32 offset)
 {
     return gic_hw_ops->make_hwdom_madt(d, offset);
+}
+
+unsigned long gic_get_hwdom_madt_size(const struct domain *d)
+{
+    unsigned long madt_size;
+
+    madt_size = sizeof(struct acpi_table_madt)
+                + sizeof(struct acpi_madt_generic_interrupt) * d->max_vcpus
+                + sizeof(struct acpi_madt_generic_distributor)
+                + gic_hw_ops->get_hwdom_extra_madt_size(d);
+
+    return madt_size;
 }
 
 int gic_iomem_deny_access(const struct domain *d)

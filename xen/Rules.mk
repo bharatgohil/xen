@@ -119,6 +119,10 @@ ifeq ($(CONFIG_GCOV),y)
 $(filter-out %.init.o $(nogcov-y),$(obj-y) $(obj-bin-y) $(extra-y)): CFLAGS += -fprofile-arcs -ftest-coverage
 endif
 
+ifeq ($(CONFIG_UBSAN),y)
+$(filter-out %.init.o $(noubsan-y),$(obj-y) $(obj-bin-y) $(extra-y)): CFLAGS += -fsanitize=undefined
+endif
+
 ifeq ($(CONFIG_LTO),y)
 CFLAGS += -flto
 LDFLAGS-$(clang) += -plugin LLVMgold.so
@@ -166,7 +170,7 @@ FORCE:
 
 .PHONY: clean
 clean:: $(addprefix _clean_, $(subdir-all))
-	rm -f *.o *~ core $(DEPS)
+	rm -f *.o *~ core $(DEPS_RM)
 _clean_%/: FORCE
 	$(MAKE) -f $(BASEDIR)/Rules.mk -C $* clean
 
@@ -204,4 +208,4 @@ $(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y)): %.init.o: %.o Makefile
 %.s: %.S Makefile
 	$(CPP) $(AFLAGS) $< -o $@
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

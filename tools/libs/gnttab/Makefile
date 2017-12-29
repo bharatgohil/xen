@@ -7,7 +7,7 @@ SHLIB_LDFLAGS += -Wl,--version-script=libxengnttab.map
 
 CFLAGS   += -Werror -Wmissing-prototypes
 CFLAGS   += -I./include $(CFLAGS_xeninclude)
-CFLAGS   += $(CFLAGS_libxentoollog)
+CFLAGS   += $(CFLAGS_libxentoollog) $(CFLAGS_libxentoolcore)
 
 SRCS-GNTTAB            += gnttab_core.c
 SRCS-GNTSHR            += gntshr_core.c
@@ -64,7 +64,7 @@ libxengnttab.so.$(MAJOR): libxengnttab.so.$(MAJOR).$(MINOR)
 	$(SYMLINK_SHLIB) $< $@
 
 libxengnttab.so.$(MAJOR).$(MINOR): $(PIC_OBJS) libxengnttab.map
-	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxengnttab.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxengnttab.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxentoolcore) $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: build
@@ -77,13 +77,22 @@ install: build
 	$(INSTALL_DATA) include/xengnttab.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xengnttab.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xengnttab.pc
+	rm -f $(DESTDIR)$(includedir)/xengnttab.h
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.so
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxengnttab.so.$(MAJOR).$(MINOR) libxengnttab.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xengnttab.pc

@@ -21,7 +21,8 @@ ovmf-dir:
 
 seabios-dir:
 	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
-	$(MAKE) -C seabios-dir defconfig
+	cp seabios-config seabios-dir/.config;
+	$(MAKE) -C seabios-dir olddefconfig
 
 .PHONY: all
 all: $(SUBDIRS-y)
@@ -46,6 +47,16 @@ ifeq ($(CONFIG_SEABIOS),y)
 endif
 ifeq ($(CONFIG_OVMF),y)
 	$(INSTALL_DATA) ovmf-dir/ovmf.bin $(INST_DIR)/ovmf.bin
+endif
+
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(INST_DIR)/, $(notdir $(TARGET)))
+ifeq ($(CONFIG_SEABIOS),y)
+	rm -f $(INST_DIR)/seabios.bin
+endif
+ifeq ($(CONFIG_OVMF),y)
+	rm -f $(INST_DIR)/ovmf.bin
 endif
 
 .PHONY: clean

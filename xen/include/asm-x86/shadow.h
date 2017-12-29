@@ -69,8 +69,8 @@ int shadow_track_dirty_vram(struct domain *d,
  * and disable ephemeral shadow modes (test mode and log-dirty mode) and
  * manipulate the log-dirty bitmap. */
 int shadow_domctl(struct domain *d, 
-                  xen_domctl_shadow_op_t *sc,
-                  XEN_GUEST_HANDLE_PARAM(void) u_domctl);
+                  struct xen_domctl_shadow_op *sc,
+                  XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl);
 
 /* Call when destroying a domain */
 void shadow_teardown(struct domain *d, bool *preempted);
@@ -102,12 +102,13 @@ int shadow_set_allocation(struct domain *d, unsigned int pages,
     ({ ASSERT_UNREACHABLE(); -EOPNOTSUPP; })
 
 static inline void sh_remove_shadows(struct domain *d, mfn_t gmfn,
-                                     bool_t fast, bool_t all) {}
+                                     int fast, int all) {}
 
 static inline void shadow_blow_tables_per_domain(struct domain *d) {}
 
-static inline int shadow_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
-                                XEN_GUEST_HANDLE_PARAM(void) u_domctl)
+static inline int shadow_domctl(struct domain *d,
+                                struct xen_domctl_shadow_op *sc,
+                                XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     return -EINVAL;
 }

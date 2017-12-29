@@ -40,7 +40,7 @@ string_param("console", opt_console);
 /* Char 2: If this character is 'x', then do not auto-switch to DOM0 when it */
 /*         boots. Any other value, or omitting the char, enables auto-switch */
 static unsigned char __read_mostly opt_conswitch[3] = "a";
-string_param("conswitch", opt_conswitch);
+string_runtime_param("conswitch", opt_conswitch);
 
 /* sync_console: force synchronous console output (useful for debugging). */
 static bool_t __initdata opt_sync_console;
@@ -67,8 +67,8 @@ enum con_timestamp_mode
 
 static enum con_timestamp_mode __read_mostly opt_con_timestamp_mode = TSM_NONE;
 
-static void parse_console_timestamps(char *s);
-custom_param("console_timestamps", parse_console_timestamps);
+static int parse_console_timestamps(const char *s);
+custom_runtime_param("console_timestamps", parse_console_timestamps);
 
 /* conring_size: allows a large console ring than default (16kB). */
 static uint32_t __initdata opt_conring_size;
@@ -123,8 +123,8 @@ static int __read_mostly xenlog_guest_upper_thresh =
 static int __read_mostly xenlog_guest_lower_thresh =
     XENLOG_GUEST_LOWER_THRESHOLD;
 
-static void parse_loglvl(char *s);
-static void parse_guest_loglvl(char *s);
+static int parse_loglvl(const char *s);
+static int parse_guest_loglvl(const char *s);
 
 /*
  * <lvl> := none|error|warning|info|debug|all
@@ -134,8 +134,8 @@ static void parse_guest_loglvl(char *s);
  * Similar definitions for guest_loglvl, but applies to guest tracing.
  * Defaults: loglvl=warning ; guest_loglvl=none/warning
  */
-custom_param("loglvl", parse_loglvl);
-custom_param("guest_loglvl", parse_guest_loglvl);
+custom_runtime_param("loglvl", parse_loglvl);
+custom_runtime_param("guest_loglvl", parse_guest_loglvl);
 
 static atomic_t print_everything = ATOMIC_INIT(0);
 
@@ -145,7 +145,7 @@ static atomic_t print_everything = ATOMIC_INIT(0);
         return (lvlnum);                                \
     }
 
-static int __init __parse_loglvl(char *s, char **ps)
+static int __parse_loglvl(const char *s, const char **ps)
 {
     ___parse_loglvl(s, ps, "none",    0);
     ___parse_loglvl(s, ps, "error",   1);
@@ -156,23 +156,26 @@ static int __init __parse_loglvl(char *s, char **ps)
     return 2; /* sane fallback */
 }
 
-static void __init _parse_loglvl(char *s, int *lower, int *upper)
+static int _parse_loglvl(const char *s, int *lower, int *upper)
 {
     *lower = *upper = __parse_loglvl(s, &s);
     if ( *s == '/' )
         *upper = __parse_loglvl(s+1, &s);
     if ( *upper < *lower )
         *upper = *lower;
+
+    return *s ? -EINVAL : 0;
 }
 
-static void __init parse_loglvl(char *s)
+static int parse_loglvl(const char *s)
 {
-    _parse_loglvl(s, &xenlog_lower_thresh, &xenlog_upper_thresh);
+    return _parse_loglvl(s, &xenlog_lower_thresh, &xenlog_upper_thresh);
 }
 
-static void __init parse_guest_loglvl(char *s)
+static int parse_guest_loglvl(const char *s)
 {
-    _parse_loglvl(s, &xenlog_guest_lower_thresh, &xenlog_guest_upper_thresh);
+    return _parse_loglvl(s, &xenlog_guest_lower_thresh,
+                         &xenlog_guest_upper_thresh);
 }
 
 static char *loglvl_str(int lvl)
@@ -603,16 +606,16 @@ static int printk_prefix_check(char *p, char **pp)
             ((loglvl < upper_thresh) && printk_ratelimit()));
 } 
 
-static void __init parse_console_timestamps(char *s)
+static int parse_console_timestamps(const char *s)
 {
-    switch ( parse_bool(s) )
+    switch ( parse_bool(s, NULL) )
     {
     case 0:
         opt_con_timestamp_mode = TSM_NONE;
-        return;
+        return 0;
     case 1:
         opt_con_timestamp_mode = TSM_DATE;
-        return;
+        return 0;
     }
     if ( *s == '\0' || /* Compat for old booleanparam() */
          !strcmp(s, "date") )
@@ -623,6 +626,10 @@ static void __init parse_console_timestamps(char *s)
         opt_con_timestamp_mode = TSM_BOOT;
     else if ( !strcmp(s, "none") )
         opt_con_timestamp_mode = TSM_NONE;
+    else
+        return -EINVAL;
+
+    return 0;
 }
 
 static void printk_start_of_line(const char *prefix)

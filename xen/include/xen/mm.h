@@ -57,10 +57,19 @@
 TYPE_SAFE(unsigned long, mfn);
 #define PRI_mfn          "05lx"
 #define INVALID_MFN      _mfn(~0UL)
+/*
+ * To be used for global variable initialization. This workaround a bug
+ * in GCC < 5.0.
+ */
+#define INVALID_MFN_INITIALIZER { ~0UL }
 
 #ifndef mfn_t
 #define mfn_t /* Grep fodder: mfn_t, _mfn() and mfn_x() are defined above */
+#define _mfn
+#define mfn_x
 #undef mfn_t
+#undef _mfn
+#undef mfn_x
 #endif
 
 static inline mfn_t mfn_add(mfn_t mfn, unsigned long i)
@@ -86,10 +95,19 @@ static inline bool_t mfn_eq(mfn_t x, mfn_t y)
 TYPE_SAFE(unsigned long, gfn);
 #define PRI_gfn          "05lx"
 #define INVALID_GFN      _gfn(~0UL)
+/*
+ * To be used for global variable initialization. This workaround a bug
+ * in GCC < 5.0 https://gcc.gnu.org/bugzilla/show_bug.cgi?id=64856
+ */
+#define INVALID_GFN_INITIALIZER { ~0UL }
 
 #ifndef gfn_t
 #define gfn_t /* Grep fodder: gfn_t, _gfn() and gfn_x() are defined above */
+#define _gfn
+#define gfn_x
 #undef gfn_t
+#undef _gfn
+#undef gfn_x
 #endif
 
 static inline gfn_t gfn_add(gfn_t gfn, unsigned long i)
@@ -118,7 +136,11 @@ TYPE_SAFE(unsigned long, pfn);
 
 #ifndef pfn_t
 #define pfn_t /* Grep fodder: pfn_t, _pfn() and pfn_x() are defined above */
+#define _pfn
+#define pfn_x
 #undef pfn_t
+#undef _pfn
+#undef pfn_x
 #endif
 
 struct page_info;
@@ -129,8 +151,7 @@ struct domain *__must_check page_get_owner_and_reference(struct page_info *);
 
 /* Boot-time allocator. Turns into generic allocator after bootstrap. */
 void init_boot_pages(paddr_t ps, paddr_t pe);
-unsigned long alloc_boot_pages(
-    unsigned long nr_pfns, unsigned long pfn_align);
+mfn_t alloc_boot_pages(unsigned long nr_pfns, unsigned long pfn_align);
 void end_boot_allocator(void);
 
 /* Xen suballocator. These functions are interrupt-safe. */
@@ -138,6 +159,7 @@ void init_xenheap_pages(paddr_t ps, paddr_t pe);
 void xenheap_max_mfn(unsigned long mfn);
 void *alloc_xenheap_pages(unsigned int order, unsigned int memflags);
 void free_xenheap_pages(void *v, unsigned int order);
+bool scrub_free_pages(void);
 #define alloc_xenheap_page() (alloc_xenheap_pages(0,0))
 #define free_xenheap_page(v) (free_xenheap_pages(v,0))
 /* Map machine page range in Xen virtual address space. */
@@ -176,7 +198,7 @@ int offline_page(unsigned long mfn, int broken, uint32_t *status);
 int query_page_offline(unsigned long mfn, uint32_t *status);
 unsigned long total_free_pages(void);
 
-void scrub_heap_pages(void);
+void heap_init_late(void);
 
 int assign_pages(
     struct domain *d,
@@ -224,7 +246,11 @@ struct npfec {
 #define  MEMF_no_owner    (1U<<_MEMF_no_owner)
 #define _MEMF_no_tlbflush 6
 #define  MEMF_no_tlbflush (1U<<_MEMF_no_tlbflush)
-#define _MEMF_node        8
+#define _MEMF_no_icache_flush 7
+#define  MEMF_no_icache_flush (1U<<_MEMF_no_icache_flush)
+#define _MEMF_no_scrub    8
+#define  MEMF_no_scrub    (1U<<_MEMF_no_scrub)
+#define _MEMF_node        16
 #define  MEMF_node_mask   ((1U << (8 * sizeof(nodeid_t))) - 1)
 #define  MEMF_node(n)     ((((n) + 1) & MEMF_node_mask) << _MEMF_node)
 #define  MEMF_get_node(f) ((((f) >> _MEMF_node) - 1) & MEMF_node_mask)
@@ -553,9 +579,12 @@ int xenmem_add_to_physmap_one(struct domain *d, unsigned int space,
                               union xen_add_to_physmap_batch_extra extra,
                               unsigned long idx, gfn_t gfn);
 
-/* Returns 1 on success, 0 on error, negative if the ring
- * for event propagation is full in the presence of paging */
-int guest_remove_page(struct domain *d, unsigned long gfn);
+/* Return 0 on success, or negative on error. */
+int __must_check guest_remove_page(struct domain *d, unsigned long gmfn);
+int __must_check steal_page(struct domain *d, struct page_info *page,
+                            unsigned int memflags);
+int __must_check donate_page(struct domain *d, struct page_info *page,
+                             unsigned int memflags);
 
 #define RAM_TYPE_CONVENTIONAL 0x00000001
 #define RAM_TYPE_RESERVED     0x00000002
@@ -569,6 +598,9 @@ int page_is_ram_type(unsigned long mfn, unsigned long mem_type);
 int prepare_ring_for_helper(struct domain *d, unsigned long gmfn,
                             struct page_info **_page, void **_va);
 void destroy_ring_for_helper(void **_va, struct page_info *page);
+
+/* Return the upper bound of MFNs, including hotplug memory. */
+unsigned long get_upper_mfn_bound(void);
 
 #include <asm/flushtlb.h>
 

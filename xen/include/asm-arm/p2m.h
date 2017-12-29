@@ -21,7 +21,13 @@ extern void memory_type_changed(struct domain *);
 
 /* Per-p2m-table state */
 struct p2m_domain {
-    /* Lock that protects updates to the p2m */
+    /*
+     * Lock that protects updates to the p2m.
+     *
+     * Please note that we use this lock in a nested way by calling
+     * access_guest_memory_by_ipa in guest_walk_(sd|ld). This must be
+     * considered in the future implementation.
+     */
     rwlock_t lock;
 
     /* Pages used to construct the p2m */
@@ -76,10 +82,10 @@ struct p2m_domain {
      * If true, and an access fault comes in and there is no vm_event listener,
      * pause domain. Otherwise, remove access restrictions.
      */
-    bool_t access_required;
+    bool access_required;
 
     /* Defines if mem_access is in use for the domain. */
-    bool_t mem_access_enabled;
+    bool mem_access_enabled;
 
     /*
      * Default P2M access type for each page in the the domain: new pages,
@@ -258,24 +264,7 @@ static inline int guest_physmap_add_page(struct domain *d,
     return guest_physmap_add_entry(d, gfn, mfn, page_order, p2m_ram_rw);
 }
 
-void guest_physmap_remove_page(struct domain *d,
-                               gfn_t gfn,
-                               mfn_t mfn, unsigned int page_order);
-
 mfn_t gfn_to_mfn(struct domain *d, gfn_t gfn);
-
-/*
- * Populate-on-demand
- */
-
-/*
- * Call when decreasing memory reservation to handle PoD entries properly.
- * Will return '1' if all entries were handled and nothing more need be done.
- */
-int
-p2m_pod_decrease_reservation(struct domain *d,
-                             xen_pfn_t gpfn,
-                             unsigned int order);
 
 /* Look up a GFN and take a reference count on the backing page. */
 typedef unsigned int p2m_query_t;
@@ -336,9 +325,9 @@ static inline int get_page_and_type(struct page_info *page,
 /* get host p2m table */
 #define p2m_get_hostp2m(d) (&(d)->arch.p2m)
 
-static inline bool_t p2m_vm_event_sanity_check(struct domain *d)
+static inline bool p2m_vm_event_sanity_check(struct domain *d)
 {
-    return 1;
+    return true;
 }
 
 /*

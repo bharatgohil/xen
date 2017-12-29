@@ -51,6 +51,7 @@
 #define MSR_IA32_MCG_CAP		0x00000179
 #define MSR_IA32_MCG_STATUS		0x0000017a
 #define MSR_IA32_MCG_CTL		0x0000017b
+#define MSR_IA32_MCG_EXT_CTL	0x000004d0
 
 #define MSR_IA32_PEBS_ENABLE		0x000003f1
 #define MSR_IA32_DS_AREA		0x00000600
@@ -296,6 +297,7 @@
 #define IA32_FEATURE_CONTROL_SENTER_PARAM_CTL         0x7f00
 #define IA32_FEATURE_CONTROL_ENABLE_SENTER            0x8000
 #define IA32_FEATURE_CONTROL_SGX_ENABLE               0x40000
+#define IA32_FEATURE_CONTROL_LMCE_ON                  0x100000
 
 #define MSR_IA32_TSC_ADJUST		0x0000003b
 
@@ -303,7 +305,7 @@
 #define MSR_IA32_APICBASE_BSP		(1<<8)
 #define MSR_IA32_APICBASE_EXTD		(1<<10)
 #define MSR_IA32_APICBASE_ENABLE	(1<<11)
-#define MSR_IA32_APICBASE_BASE		(0xfffff<<12)
+#define MSR_IA32_APICBASE_BASE		0x000ffffffffff000ul
 #define MSR_IA32_APICBASE_MSR           0x800
 #define MSR_IA32_APICTPR_MSR            0x808
 #define MSR_IA32_APICPPR_MSR            0x80a
@@ -345,6 +347,7 @@
 #define MSR_IA32_PSR_L3_MASK(n)	(0x00000c90 + (n))
 #define MSR_IA32_PSR_L3_MASK_CODE(n)	(0x00000c90 + (n) * 2 + 1)
 #define MSR_IA32_PSR_L3_MASK_DATA(n)	(0x00000c90 + (n) * 2)
+#define MSR_IA32_PSR_L2_MASK(n)		(0x00000d10 + (n))
 
 /* Intel Model 6 */
 #define MSR_P6_PERFCTR(n)		(0x000000c1 + (n))

@@ -119,12 +119,8 @@ AC_SUBST(LINUX_BACKEND_MODULES)
 dnl Enable blktap2 on Linux only.
 AC_ARG_ENABLE([blktap2],
     AS_HELP_STRING([--enable-blktap2],
-                   [Enable blktap2, (DEFAULT is on for Linux, otherwise off)]),,[
-    case "$host_os" in
-        linux*)
-           enable_blktap2="yes";;
-        *) enable_blktap2="no";;
-    esac
+                   [Enable blktap2, (DEFAULT is off)]),,[
+        enable_blktap2="no"
 ])
 AS_IF([test "x$enable_blktap2" = "xyes"], [
 AC_DEFINE([HAVE_BLKTAP2], [1], [Blktap2 enabled])
@@ -293,9 +289,9 @@ AC_PROG_OCAML
 AC_PROG_FINDLIB
 
 AS_IF([test "x$ocamltools" = "xy"], [
-    AS_IF([test "x$OCAMLC" = "xno" || test "x$OCAMLFIND" = "xno"], [
+    AS_IF([test "x$OCAMLOPT" = "xno" || test "x$OCAMLFIND" = "xno"], [
         AS_IF([test "x$enable_ocamltools" = "xyes"], [
-            AC_MSG_ERROR([Ocaml tools enabled, but unable to find Ocaml])])
+            AC_MSG_ERROR([Ocaml tools enabled, but missing ocamlopt or ocamlfind])])
         ocamltools="n"
     ], [
         AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [3.09.3], [

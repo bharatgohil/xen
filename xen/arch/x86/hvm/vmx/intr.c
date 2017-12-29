@@ -188,13 +188,13 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
 
     if ( nestedhvm_vcpu_in_guestmode(v) )
     {
+        ctrl = get_vvmcs(v, PIN_BASED_VM_EXEC_CONTROL);
+        if ( !(ctrl & PIN_BASED_EXT_INTR_MASK) )
+            return 0;
+
         if ( intack.source == hvm_intsrc_pic ||
                  intack.source == hvm_intsrc_lapic )
         {
-            ctrl = get_vvmcs(v, PIN_BASED_VM_EXEC_CONTROL);
-            if ( !(ctrl & PIN_BASED_EXT_INTR_MASK) )
-                return 0;
-
             vmx_inject_extint(intack.vector, intack.source);
 
             ctrl = get_vvmcs(v, VM_EXIT_CONTROLS);
@@ -211,6 +211,11 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
             else
                 vmx_enable_intr_window(v, intack);
 
+            return 1;
+        }
+        else if ( intack.source == hvm_intsrc_vector )
+        {
+            vmx_inject_extint(intack.vector, intack.source);
             return 1;
         }
     }
@@ -318,6 +323,7 @@ void vmx_intr_assist(void)
         */
         if ( pt_vector != -1 )
         {
+#ifndef NDEBUG
             /*
              * We assert that intack.vector is the highest priority vector for
              * only an interrupt from vlapic can reach this point and the
@@ -334,7 +340,7 @@ void vmx_intr_assist(void)
                 const uint32_t *word;
                 unsigned int i;
 
-                printk(XENLOG_ERR "%pv: intack: %02x:%u pt: %02x\n",
+                printk(XENLOG_ERR "%pv: intack: %u:%02x pt: %02x\n",
                        current, intack.source, intack.vector, pt_vector);
 
                 vlapic = vcpu_vlapic(v);
@@ -357,6 +363,7 @@ void vmx_intr_assist(void)
                     printk("\n");
                 }
             }
+#endif
             ASSERT(intack.vector >= pt_vector);
             vmx_set_eoi_exit_bitmap(v, intack.vector);
         }

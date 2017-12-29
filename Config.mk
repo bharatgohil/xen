@@ -56,6 +56,11 @@ HOSTCC ?= clang
 HOSTCXX ?= clang++
 endif
 
+DEPS_INCLUDE = $(addsuffix .d2, $(basename $(wildcard $(DEPS))))
+DEPS_RM = $(DEPS) $(DEPS_INCLUDE)
+
+%.d2: %.d
+	sed "s! $$PWD/! !" $^ >$@.tmp && mv -f $@.tmp $@
 
 include $(XEN_ROOT)/config/$(XEN_OS).mk
 include $(XEN_ROOT)/config/$(XEN_TARGET_ARCH).mk
@@ -267,22 +272,22 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= 5920a9d16b1ab887c2858224316a98e961d71b05
-QEMU_UPSTREAM_REVISION ?= master
-MINIOS_UPSTREAM_REVISION ?= ca013fa9baf92f47469ba1f2e1aaa31c41d8a0bb
-# Tue Dec 13 15:02:02 2016 +0000
-# build: prepend OBJ_DIR to linker script
+OVMF_UPSTREAM_REVISION ?= 947f3737abf65fda63f3ffd97fddfa6986986868
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.10.0
+MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.10.0
+# Mon Oct 16 16:36:41 2017 +0100
+# Update Xen header files again
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.10.0
+SEABIOS_UPSTREAM_REVISION ?= rel-1.10.2
 # Wed Jun 22 14:53:24 2016 +0800
 # fw/msr_feature_control: add support to set MSR_IA32_FEATURE_CONTROL
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= 8051789e982499050680a26febeada7467e18a8d
-# Thu Mar 9 11:14:55 2017 +0000
-# cirrus/vnc: zap drop bitblit support from console code.
+QEMU_TRADITIONAL_REVISION ?= xen-4.10.0
+# Fri Sep 15 19:37:27 2017 +0100
+# qemu-xen-traditional: Link against xentoolcore
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.

@@ -31,7 +31,7 @@ char *__acpi_map_table(paddr_t phys, unsigned long size)
 
     offset = phys & (PAGE_SIZE - 1);
     mapped_size = PAGE_SIZE - offset;
-    set_fixmap(FIXMAP_ACPI_BEGIN, phys >> PAGE_SHIFT, PAGE_HYPERVISOR);
+    set_fixmap(FIXMAP_ACPI_BEGIN, maddr_to_mfn(phys), PAGE_HYPERVISOR);
     base = FIXMAP_ADDR(FIXMAP_ACPI_BEGIN);
 
     /* Most cases can be covered by the below. */
@@ -41,21 +41,21 @@ char *__acpi_map_table(paddr_t phys, unsigned long size)
         if ( ++idx > FIXMAP_ACPI_END )
             return NULL;    /* cannot handle this */
         phys += PAGE_SIZE;
-        set_fixmap(idx, phys >> PAGE_SHIFT, PAGE_HYPERVISOR);
+        set_fixmap(idx, maddr_to_mfn(phys), PAGE_HYPERVISOR);
         mapped_size += PAGE_SIZE;
     }
 
     return ((char *) base + offset);
 }
 
-/* 1 to indicate PSCI 0.2+ is implemented */
-bool_t __init acpi_psci_present(void)
+/* True to indicate PSCI 0.2+ is implemented */
+bool __init acpi_psci_present(void)
 {
     return acpi_gbl_FADT.arm_boot_flags & ACPI_FADT_PSCI_COMPLIANT;
 }
 
-/* 1 to indicate HVC is present instead of SMC as the PSCI conduit */
-bool_t __init acpi_psci_hvc_present(void)
+/* True to indicate HVC is present instead of SMC as the PSCI conduit */
+bool __init acpi_psci_hvc_present(void)
 {
     return acpi_gbl_FADT.arm_boot_flags & ACPI_FADT_PSCI_USE_HVC;
 }

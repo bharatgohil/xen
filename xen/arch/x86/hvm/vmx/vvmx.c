@@ -98,13 +98,15 @@ int nvmx_vcpu_initialise(struct vcpu *v)
         clear_page(vw);
 
         /*
-         * For the following 4 encodings, we need to handle them in VMM.
+         * For the following 6 encodings, we need to handle them in VMM.
          * Let them vmexit as usual.
          */
         set_bit(IO_BITMAP_A, vw);
         set_bit(VMCS_HIGH(IO_BITMAP_A), vw);
         set_bit(IO_BITMAP_B, vw);
         set_bit(VMCS_HIGH(IO_BITMAP_B), vw);
+        set_bit(MSR_BITMAP, vw);
+        set_bit(VMCS_HIGH(MSR_BITMAP), vw);
 
         unmap_domain_page(vw);
     }
@@ -392,7 +394,7 @@ static int vmx_inst_check_privilege(struct cpu_user_regs *regs, int vmxop_check)
     else if ( !nvmx_vcpu_in_vmx(v) )
         goto invalid_op;
 
-    if ( vmx_guest_x86_mode(v) < (hvm_long_mode_enabled(v) ? 8 : 2) )
+    if ( vmx_guest_x86_mode(v) < (hvm_long_mode_active(v) ? 8 : 2) )
         goto invalid_op;
     else if ( nestedhvm_vcpu_in_guestmode(v) )
         goto vmexit;
@@ -479,9 +481,9 @@ static int decode_vmx_inst(struct cpu_user_regs *regs,
             int rc = hvm_copy_from_guest_linear(poperandS, base, size,
                                                 0, &pfinfo);
 
-            if ( rc == HVMCOPY_bad_gva_to_gfn )
+            if ( rc == HVMTRANS_bad_linear_to_gfn )
                 hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-            if ( rc != HVMCOPY_okay )
+            if ( rc != HVMTRANS_okay )
                 return X86EMUL_EXCEPTION;
         }
         decode->mem = base;
@@ -752,14 +754,27 @@ static void __clear_current_vvmcs(struct vcpu *v)
         __vmpclear(nvcpu->nv_n2vmcx_pa);
 }
 
-static bool_t __must_check _map_msr_bitmap(struct vcpu *v)
+/*
+ * Refreshes the MSR bitmap mapping for the current nested vcpu.  Returns true
+ * for a successful mapping, and returns false for MSR_BITMAP parameter errors
+ * or gfn mapping errors.
+ */
+static bool __must_check _map_msr_bitmap(struct vcpu *v)
 {
     struct nestedvmx *nvmx = &vcpu_2_nvmx(v);
-    unsigned long gpa;
+    uint64_t gpa;
 
     if ( nvmx->msrbitmap )
+    {
         hvm_unmap_guest_frame(nvmx->msrbitmap, 1);
+        nvmx->msrbitmap = NULL;
+    }
+
     gpa = get_vvmcs(v, MSR_BITMAP);
+
+    if ( !IS_ALIGNED(gpa, PAGE_SIZE) )
+        return false;
+
     nvmx->msrbitmap = hvm_map_guest_frame_ro(gpa >> PAGE_SHIFT, 1);
 
     return nvmx->msrbitmap != NULL;
@@ -1094,8 +1109,7 @@ static void load_shadow_guest_state(struct vcpu *v)
 
 uint64_t get_shadow_eptp(struct vcpu *v)
 {
-    uint64_t np2m_base = nvmx_vcpu_eptp_base(v);
-    struct p2m_domain *p2m = p2m_get_nestedp2m(v, np2m_base);
+    struct p2m_domain *p2m = p2m_get_nestedp2m(v);
     struct ept_data *ept = &p2m->ept;
 
     ept->mfn = pagetable_get_pfn(p2m_get_pagetable(p2m));
@@ -1154,13 +1168,13 @@ static void virtual_vmentry(struct cpu_user_regs *regs)
     /*
      * EFER handling:
      * hvm_set_efer won't work if CR0.PG = 1, so we change the value
-     * directly to make hvm_long_mode_enabled(v) work in L2.
+     * directly to make hvm_long_mode_active(v) work in L2.
      * An additional update_paging_modes is also needed if
      * there is 32/64 switch. v->arch.hvm_vcpu.guest_efer doesn't
      * need to be saved, since its value on vmexit is determined by
      * L1 exit_controls
      */
-    lm_l1 = !!hvm_long_mode_enabled(v);
+    lm_l1 = hvm_long_mode_active(v);
     lm_l2 = !!(get_vvmcs(v, VM_ENTRY_CONTROLS) & VM_ENTRY_IA32E_MODE);
 
     if ( lm_l2 )
@@ -1187,6 +1201,7 @@ static void virtual_vmentry(struct cpu_user_regs *regs)
 
     /* Setup virtual ETP for L2 guest*/
     if ( nestedhvm_paging_mode_hap(v) )
+        /* This will setup the initial np2m for the nested vCPU */
         __vmwrite(EPT_POINTER, get_shadow_eptp(v));
     else
         __vmwrite(EPT_POINTER, get_host_eptp(v));
@@ -1353,13 +1368,16 @@ static void virtual_vmexit(struct cpu_user_regs *regs)
          !(v->arch.hvm_vcpu.guest_efer & EFER_LMA) )
         shadow_to_vvmcs_bulk(v, ARRAY_SIZE(gpdpte_fields), gpdpte_fields);
 
+    /* This will clear current pCPU bit in p2m->dirty_cpumask */
+    np2m_schedule(NP2M_SCHEDLE_OUT);
+
     vmx_vmcs_switch(v->arch.hvm_vmx.vmcs_pa, nvcpu->nv_n1vmcx_pa);
 
     nestedhvm_vcpu_exit_guestmode(v);
     nvcpu->nv_vmexit_pending = 0;
     nvcpu->nv_vmswitch_in_progress = 1;
 
-    lm_l2 = !!hvm_long_mode_enabled(v);
+    lm_l2 = hvm_long_mode_active(v);
     lm_l1 = !!(get_vvmcs(v, VM_EXIT_CONTROLS) & VM_EXIT_IA32E_MODE);
 
     if ( lm_l1 )
@@ -1391,11 +1409,33 @@ static void virtual_vmexit(struct cpu_user_regs *regs)
     vmsucceed(regs);
 }
 
+static void nvmx_eptp_update(void)
+{
+    struct vcpu *curr = current;
+
+    if ( !nestedhvm_vcpu_in_guestmode(curr) ||
+          vcpu_nestedhvm(curr).nv_vmexit_pending ||
+         !vcpu_nestedhvm(curr).stale_np2m ||
+         !nestedhvm_paging_mode_hap(curr) )
+        return;
+
+    /*
+     * Interrupts are enabled here, so we need to clear stale_np2m
+     * before we do the vmwrite.  If we do it in the other order, an
+     * and IPI comes in changing the shadow eptp after the vmwrite,
+     * we'll complete the vmenter with a stale eptp value.
+     */
+    vcpu_nestedhvm(curr).stale_np2m = false;
+    __vmwrite(EPT_POINTER, get_shadow_eptp(curr));
+}
+
 void nvmx_switch_guest(void)
 {
     struct vcpu *v = current;
     struct nestedvcpu *nvcpu = &vcpu_nestedhvm(v);
     struct cpu_user_regs *regs = guest_cpu_user_regs();
+
+    nvmx_eptp_update();
 
     /*
      * A pending IO emulation may still be not finished. In this case, no
@@ -1453,7 +1493,7 @@ int nvmx_handle_vmxon(struct cpu_user_regs *regs)
     }
 
     rc = hvm_copy_from_guest_phys(&nvmcs_revid, gpa, sizeof(nvmcs_revid));
-    if ( rc != HVMCOPY_okay ||
+    if ( rc != HVMTRANS_okay ||
          (nvmcs_revid & ~VMX_BASIC_REVISION_MASK) ||
          ((nvmcs_revid ^ vmx_basic_msr) & VMX_BASIC_REVISION_MASK) )
     {
@@ -1731,9 +1771,9 @@ int nvmx_handle_vmptrst(struct cpu_user_regs *regs)
     gpa = nvcpu->nv_vvmcxaddr;
 
     rc = hvm_copy_to_guest_linear(decode.mem, &gpa, decode.len, 0, &pfinfo);
-    if ( rc == HVMCOPY_bad_gva_to_gfn )
+    if ( rc == HVMTRANS_bad_linear_to_gfn )
         hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-    if ( rc != HVMCOPY_okay )
+    if ( rc != HVMTRANS_okay )
         return X86EMUL_EXCEPTION;
 
     vmsucceed(regs);
@@ -1820,9 +1860,9 @@ int nvmx_handle_vmread(struct cpu_user_regs *regs)
     switch ( decode.type ) {
     case VMX_INST_MEMREG_TYPE_MEMORY:
         rc = hvm_copy_to_guest_linear(decode.mem, &value, decode.len, 0, &pfinfo);
-        if ( rc == HVMCOPY_bad_gva_to_gfn )
+        if ( rc == HVMTRANS_bad_linear_to_gfn )
             hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-        if ( rc != HVMCOPY_okay )
+        if ( rc != HVMTRANS_okay )
             return X86EMUL_EXCEPTION;
         break;
     case VMX_INST_MEMREG_TYPE_REG:
@@ -1895,12 +1935,7 @@ int nvmx_handle_invept(struct cpu_user_regs *regs)
     {
     case INVEPT_SINGLE_CONTEXT:
     {
-        struct p2m_domain *p2m = p2m_get_nestedp2m(current, eptp);
-        if ( p2m )
-        {
-            p2m_flush(current, p2m);
-            ept_sync_domain(p2m);
-        }
+        np2m_flush_base(current, eptp);
         break;
     }
     case INVEPT_ALL_CONTEXT:
@@ -2084,10 +2119,6 @@ int nvmx_msr_read_intercept(unsigned int msr, u64 *msr_content)
         data = gen_vmx_msr(data, VMX_ENTRY_CTLS_DEFAULT1, host_data);
         break;
 
-    case MSR_IA32_FEATURE_CONTROL:
-        data = IA32_FEATURE_CONTROL_LOCK |
-               IA32_FEATURE_CONTROL_ENABLE_VMXON_OUTSIDE_SMX;
-        break;
     case MSR_IA32_VMX_VMCS_ENUM:
         /* The max index of VVMCS encoding is 0x1f. */
         data = 0x1f << 1;
@@ -2121,12 +2152,6 @@ int nvmx_msr_read_intercept(unsigned int msr, u64 *msr_content)
 
     *msr_content = data;
     return r;
-}
-
-int nvmx_msr_write_intercept(unsigned int msr, u64 msr_content)
-{
-    /* silently ignore for now */
-    return 1;
 }
 
 /* This function uses L2_gpa to walk the P2M page table in L1. If the
@@ -2294,22 +2319,23 @@ int nvmx_n2_vmexit_handler(struct cpu_user_regs *regs,
         /* inject to L1 */
         nvcpu->nv_vmexit_pending = 1;
         break;
+
     case EXIT_REASON_MSR_READ:
     case EXIT_REASON_MSR_WRITE:
-    {
-        int status;
         ctrl = __n2_exec_control(v);
-        if ( ctrl & CPU_BASED_ACTIVATE_MSR_BITMAP )
-        {
-            status = vmx_check_msr_bitmap(nvmx->msrbitmap, regs->ecx,
-                         !!(exit_reason == EXIT_REASON_MSR_WRITE));
-            if ( status )
-                nvcpu->nv_vmexit_pending = 1;
-        }
-        else
+
+        /* Without ACTIVATE_MSR_BITMAP, all MSRs are intercepted. */
+        if ( !(ctrl & CPU_BASED_ACTIVATE_MSR_BITMAP) )
             nvcpu->nv_vmexit_pending = 1;
+        else if ( !nvmx->msrbitmap )
+            /* ACTIVATE_MSR_BITMAP set, but L2 bitmap not mapped??? */
+            domain_crash(v->domain);
+        else
+            nvcpu->nv_vmexit_pending =
+                vmx_msr_is_intercepted(nvmx->msrbitmap, regs->ecx,
+                                       exit_reason == EXIT_REASON_MSR_WRITE);
         break;
-    }
+
     case EXIT_REASON_IO_INSTRUCTION:
         ctrl = __n2_exec_control(v);
         if ( ctrl & CPU_BASED_ACTIVATE_IO_BITMAP )
@@ -2550,8 +2576,8 @@ int nvmx_n2_vmexit_handler(struct cpu_user_regs *regs,
             nvcpu->nv_vmexit_pending = 1;
         break;
     default:
-        gdprintk(XENLOG_WARNING, "Unknown nested vmexit reason %x.\n",
-                 exit_reason);
+        gprintk(XENLOG_ERR, "Unexpected nested vmexit: reason %u\n",
+                exit_reason);
     }
 
     return ( nvcpu->nv_vmexit_pending == 1 );

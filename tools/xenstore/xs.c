@@ -35,6 +35,8 @@
 #include "list.h"
 #include "utils.h"
 
+#include <xentoolcore_internal.h>
+
 struct xs_stored_msg {
 	struct list_head list;
 	struct xsd_sockmsg hdr;
@@ -48,6 +50,7 @@ struct xs_stored_msg {
 struct xs_handle {
 	/* Communications channel to xenstore daemon. */
 	int fd;
+	Xentoolcore__Active_Handle tc_ah; /* for restrict */
 
 	/*
          * A read thread which pulls messages off the comms channel and
@@ -122,6 +125,7 @@ static void *read_thread(void *arg);
 
 struct xs_handle {
 	int fd;
+	Xentoolcore__Active_Handle tc_ah; /* for restrict */
 	struct list_head reply_list;
 	struct list_head watch_list;
 	/* Clients can select() on this pipe to wait for a watch to fire. */
@@ -219,34 +223,37 @@ static int get_dev(const char *connect_to)
 	return open(connect_to, O_RDWR);
 }
 
+static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
+    struct xs_handle *h = CONTAINER_OF(ah, *h, tc_ah);
+    return xentoolcore__restrict_by_dup2_null(h->fd);
+}
+
 static struct xs_handle *get_handle(const char *connect_to)
 {
 	struct stat buf;
 	struct xs_handle *h = NULL;
-	int fd = -1, saved_errno;
-
-	if (stat(connect_to, &buf) != 0)
-		return NULL;
-
-	if (S_ISSOCK(buf.st_mode))
-		fd = get_socket(connect_to);
-	else
-		fd = get_dev(connect_to);
-
-	if (fd == -1)
-		return NULL;
+	int saved_errno;
 
 	h = malloc(sizeof(*h));
-	if (h == NULL) {
-		saved_errno = errno;
-		close(fd);
-		errno = saved_errno;
-		return NULL;
-	}
+	if (h == NULL)
+		goto err;
 
 	memset(h, 0, sizeof(*h));
+	h->fd = -1;
 
-	h->fd = fd;
+	h->tc_ah.restrict_callback = all_restrict_cb;
+	xentoolcore__register_active_handle(&h->tc_ah);
+
+	if (stat(connect_to, &buf) != 0)
+		goto err;
+
+	if (S_ISSOCK(buf.st_mode))
+		h->fd = get_socket(connect_to);
+	else
+		h->fd = get_dev(connect_to);
+
+	if (h->fd == -1)
+		goto err;
 
 	INIT_LIST_HEAD(&h->reply_list);
 	INIT_LIST_HEAD(&h->watch_list);
@@ -267,6 +274,19 @@ static struct xs_handle *get_handle(const char *connect_to)
 #endif
 
 	return h;
+
+err:
+	saved_errno = errno;
+
+	if (h) {
+		xentoolcore__deregister_active_handle(&h->tc_ah);
+		if (h->fd >= 0)
+			close(h->fd);
+	}
+	free(h);
+
+	errno = saved_errno;
+	return NULL;
 }
 
 struct xs_handle *xs_daemon_open(void)
@@ -322,6 +342,7 @@ static void close_fds_free(struct xs_handle *h) {
 		close(h->watch_pipe[1]);
 	}
 
+	xentoolcore__deregister_active_handle(&h->tc_ah);
         close(h->fd);
         
 	free(h);

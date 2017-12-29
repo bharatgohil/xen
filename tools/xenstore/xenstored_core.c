@@ -54,8 +54,6 @@
 #include "xenstored_control.h"
 #include "tdb.h"
 
-#include "hashtable.h"
-
 #ifndef NO_SOCKETS
 #if defined(HAVE_SYSTEMD)
 #define XEN_SYSTEMD_ENABLED 1
@@ -81,9 +79,8 @@ static bool recovery = true;
 static int reopen_log_pipe[2];
 static int reopen_log_pipe0_pollfd_idx = -1;
 char *tracefile = NULL;
-static TDB_CONTEXT *tdb_ctx = NULL;
+TDB_CONTEXT *tdb_ctx = NULL;
 
-static void corrupt(struct connection *conn, const char *fmt, ...);
 static const char *sockmsg_string(enum xsd_sockmsg_type type);
 
 #define log(...)							\
@@ -104,24 +101,6 @@ int quota_nb_entry_per_domain = 1000;
 int quota_nb_watch_per_domain = 128;
 int quota_max_entry_size = 2048; /* 2K */
 int quota_max_transaction = 10;
-
-TDB_CONTEXT *tdb_context(struct connection *conn)
-{
-	/* conn = NULL used in manual_node at setup. */
-	if (!conn || !conn->transaction)
-		return tdb_ctx;
-	return tdb_transaction_context(conn->transaction);
-}
-
-bool replace_tdb(const char *newname, TDB_CONTEXT *newtdb)
-{
-	if (!(tdb_ctx->flags & TDB_INTERNAL))
-		if (rename(newname, xs_daemon_tdb()) != 0)
-			return false;
-	tdb_close(tdb_ctx);
-	tdb_ctx = talloc_steal(talloc_autofree_context(), newtdb);
-	return true;
-}
 
 void trace(const char *fmt, ...)
 {
@@ -336,6 +315,7 @@ static void initialize_fds(int sock, int *p_sock_pollfd_idx,
 			   int *ptimeout)
 {
 	struct connection *conn;
+	struct wrl_timestampt now;
 
 	if (fds)
 		memset(fds, 0, sizeof(struct pollfd) * current_array_size);
@@ -355,8 +335,12 @@ static void initialize_fds(int sock, int *p_sock_pollfd_idx,
 		xce_pollfd_idx = set_fd(xenevtchn_fd(xce_handle),
 					POLLIN|POLLPRI);
 
+	wrl_gettime_now(&now);
+	wrl_log_periodic(now);
+
 	list_for_each_entry(conn, &connections, list) {
 		if (conn->domain) {
+			wrl_check_timeout(conn->domain, now, ptimeout);
 			if (domain_can_read(conn) ||
 			    (domain_can_write(conn) &&
 			     !list_empty(&conn->out_list)))
@@ -380,21 +364,6 @@ static struct node *read_node(struct connection *conn, const void *ctx,
 	TDB_DATA key, data;
 	struct xs_tdb_record_hdr *hdr;
 	struct node *node;
-	TDB_CONTEXT * context = tdb_context(conn);
-
-	key.dptr = (void *)name;
-	key.dsize = strlen(name);
-	data = tdb_fetch(context, key);
-
-	if (data.dptr == NULL) {
-		if (tdb_error(context) == TDB_ERR_NOEXIST)
-			errno = ENOENT;
-		else {
-			log("TDB error on read: %s", tdb_errorstr(context));
-			errno = EIO;
-		}
-		return NULL;
-	}
 
 	node = talloc(ctx, struct node);
 	if (!node) {
@@ -407,8 +376,26 @@ static struct node *read_node(struct connection *conn, const void *ctx,
 		errno = ENOMEM;
 		return NULL;
 	}
+
+	if (transaction_prepend(conn, name, &key))
+		return NULL;
+
+	data = tdb_fetch(tdb_ctx, key);
+
+	if (data.dptr == NULL) {
+		if (tdb_error(tdb_ctx) == TDB_ERR_NOEXIST) {
+			node->generation = NO_GENERATION;
+			access_node(conn, node, NODE_ACCESS_READ, NULL);
+			errno = ENOENT;
+		} else {
+			log("TDB error on read: %s", tdb_errorstr(tdb_ctx));
+			errno = EIO;
+		}
+		talloc_free(node);
+		return NULL;
+	}
+
 	node->parent = NULL;
-	node->tdb = tdb_context(conn);
 	talloc_steal(node, data.dptr);
 
 	/* Datalen, childlen, number of permissions */
@@ -425,31 +412,26 @@ static struct node *read_node(struct connection *conn, const void *ctx,
 	/* Children is strings, nul separated. */
 	node->children = node->data + node->datalen;
 
+	access_node(conn, node, NODE_ACCESS_READ, NULL);
+
 	return node;
 }
 
-static bool write_node(struct connection *conn, struct node *node)
+int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node)
 {
-	/*
-	 * conn will be null when this is called from manual_node.
-	 * tdb_context copes with this.
-	 */
-
-	TDB_DATA key, data;
+	TDB_DATA data;
 	void *p;
 	struct xs_tdb_record_hdr *hdr;
-
-	key.dptr = (void *)node->name;
-	key.dsize = strlen(node->name);
 
 	data.dsize = sizeof(*hdr)
 		+ node->num_perms*sizeof(node->perms[0])
 		+ node->datalen + node->childlen;
 
-	if (domain_is_unprivileged(conn) && data.dsize >= quota_max_entry_size)
-		goto error;
-
-	add_change_node(conn, node, false);
+	if (domain_is_unprivileged(conn) &&
+	    data.dsize >= quota_max_entry_size) {
+		errno = ENOSPC;
+		return errno;
+	}
 
 	data.dptr = talloc_size(node, data.dsize);
 	hdr = (void *)data.dptr;
@@ -465,14 +447,22 @@ static bool write_node(struct connection *conn, struct node *node)
 	memcpy(p, node->children, node->childlen);
 
 	/* TDB should set errno, but doesn't even set ecode AFAICT. */
-	if (tdb_store(tdb_context(conn), key, data, TDB_REPLACE) != 0) {
-		corrupt(conn, "Write of %s failed", key.dptr);
-		goto error;
+	if (tdb_store(tdb_ctx, *key, data, TDB_REPLACE) != 0) {
+		corrupt(conn, "Write of %s failed", key->dptr);
+		errno = EIO;
+		return errno;
 	}
-	return true;
- error:
-	errno = ENOSPC;
-	return false;
+	return 0;
+}
+
+static int write_node(struct connection *conn, struct node *node)
+{
+	TDB_DATA key;
+
+	if (access_node(conn, node, NODE_ACCESS_WRITE, &key))
+		return errno;
+
+	return write_node_raw(conn, &key, node);
 }
 
 static enum xs_perm_type perm_for_conn(struct connection *conn,
@@ -894,21 +884,17 @@ static int do_read(struct connection *conn, struct buffered_data *in)
 	return 0;
 }
 
-static void delete_node_single(struct connection *conn, struct node *node,
-			       bool changed)
+static void delete_node_single(struct connection *conn, struct node *node)
 {
 	TDB_DATA key;
 
-	key.dptr = (void *)node->name;
-	key.dsize = strlen(node->name);
+	if (access_node(conn, node, NODE_ACCESS_DELETE, &key))
+		return;
 
-	if (tdb_delete(tdb_context(conn), key) != 0) {
+	if (tdb_delete(tdb_ctx, key) != 0) {
 		corrupt(conn, "Could not delete '%s'", node->name);
 		return;
 	}
-
-	if (changed)
-		add_change_node(conn, node, true);
 
 	domain_entry_dec(conn, node);
 }
@@ -957,7 +943,6 @@ static struct node *construct_node(struct connection *conn, const void *ctx,
 	node = talloc(ctx, struct node);
 	if (!node)
 		goto nomem;
-	node->tdb = tdb_context(conn);
 	node->name = talloc_strdup(node, name);
 	if (!node->name)
 		goto nomem;
@@ -994,7 +979,7 @@ static int destroy_node(void *_node)
 	key.dptr = (void *)node->name;
 	key.dsize = strlen(node->name);
 
-	tdb_delete(node->tdb, key);
+	tdb_delete(tdb_ctx, key);
 	return 0;
 }
 
@@ -1014,7 +999,7 @@ static struct node *create_node(struct connection *conn, const void *ctx,
 	/* We write out the nodes down, setting destructor in case
 	 * something goes wrong. */
 	for (i = node; i; i = i->parent) {
-		if (!write_node(conn, i)) {
+		if (write_node(conn, i)) {
 			domain_entry_dec(conn, i);
 			return NULL;
 		}
@@ -1054,7 +1039,7 @@ static int do_write(struct connection *conn, struct buffered_data *in)
 	} else {
 		node->data = in->buffer + offset;
 		node->datalen = datalen;
-		if (!write_node(conn, node))
+		if (write_node(conn, node))
 			return errno;
 	}
 
@@ -1087,8 +1072,7 @@ static int do_mkdir(struct connection *conn, struct buffered_data *in)
 	return 0;
 }
 
-static void delete_node(struct connection *conn, struct node *node,
-			bool changed)
+static void delete_node(struct connection *conn, struct node *node)
 {
 	unsigned int i;
 	char *name;
@@ -1096,7 +1080,7 @@ static void delete_node(struct connection *conn, struct node *node,
 	/* Delete self, then delete children.  If we crash, then the worst
 	   that can happen is the children will continue to take up space, but
 	   will otherwise be unreachable. */
-	delete_node_single(conn, node, changed);
+	delete_node_single(conn, node);
 
 	/* Delete children, too. */
 	for (i = 0; i < node->childlen; i += strlen(node->children+i) + 1) {
@@ -1106,7 +1090,7 @@ static void delete_node(struct connection *conn, struct node *node,
 				       node->children + i);
 		child = name ? read_node(conn, node, name) : NULL;
 		if (child) {
-			delete_node(conn, child, false);
+			delete_node(conn, child);
 		}
 		else {
 			trace("delete_node: Error deleting child '%s/%s'!\n",
@@ -1125,8 +1109,8 @@ static void memdel(void *mem, unsigned off, unsigned len, unsigned total)
 }
 
 
-static bool remove_child_entry(struct connection *conn, struct node *node,
-			       size_t offset)
+static int remove_child_entry(struct connection *conn, struct node *node,
+			      size_t offset)
 {
 	size_t childlen = strlen(node->children + offset);
 	memdel(node->children, offset, childlen + 1, node->childlen);
@@ -1135,8 +1119,8 @@ static bool remove_child_entry(struct connection *conn, struct node *node,
 }
 
 
-static bool delete_child(struct connection *conn,
-			 struct node *node, const char *childname)
+static int delete_child(struct connection *conn,
+			struct node *node, const char *childname)
 {
 	unsigned int i;
 
@@ -1146,7 +1130,7 @@ static bool delete_child(struct connection *conn,
 		}
 	}
 	corrupt(conn, "Can't find child '%s' in %s", childname, node->name);
-	return false;
+	return ENOENT;
 }
 
 
@@ -1166,10 +1150,10 @@ static int _rm(struct connection *conn, const void *ctx, struct node *node,
 	if (!parent)
 		return (errno == ENOMEM) ? ENOMEM : EINVAL;
 
-	if (!delete_child(conn, parent, basename(name)))
+	if (delete_child(conn, parent, basename(name)))
 		return EINVAL;
 
-	delete_node(conn, node, true);
+	delete_node(conn, node);
 	return 0;
 }
 
@@ -1270,7 +1254,7 @@ static int do_set_perms(struct connection *conn, struct buffered_data *in)
 	node->num_perms = num;
 	domain_entry_inc(conn, node);
 
-	if (!write_node(conn, node))
+	if (write_node(conn, node))
 		return errno;
 
 	fire_watches(conn, in, name, false);
@@ -1530,7 +1514,7 @@ static void manual_node(const char *name, const char *child)
 	if (child)
 		node->childlen = strlen(child) + 1;
 
-	if (!write_node(NULL, node))
+	if (write_node(NULL, node))
 		barf_perror("Could not create initial node %s", name);
 	talloc_free(node);
 }
@@ -1609,7 +1593,7 @@ static char *child_name(const char *s1, const char *s2)
 }
 
 
-static int remember_string(struct hashtable *hash, const char *str)
+int remember_string(struct hashtable *hash, const char *str)
 {
 	char *k = malloc(strlen(str) + 1);
 
@@ -1729,6 +1713,7 @@ static int clean_store_(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA val,
 			void *private)
 {
 	struct hashtable *reachable = private;
+	char *slash;
 	char * name = talloc_strndup(NULL, key.dptr, key.dsize);
 
 	if (!name) {
@@ -1736,6 +1721,11 @@ static int clean_store_(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA val,
 		return 1;
 	}
 
+	if (name[0] != '/') {
+		slash = strchr(name, '/');
+		if (slash)
+			*slash = 0;
+	}
 	if (!hashtable_search(reachable, name)) {
 		log("clean_store: '%s' is orphaned!", name);
 		if (recovery) {
@@ -1771,7 +1761,8 @@ void check_store(void)
 	}
 
 	log("Checking store ...");
-	if (!check_store_(root, reachable))
+	if (!check_store_(root, reachable) &&
+	    !check_transactions(reachable))
 		clean_store(reachable);
 	log("Checking store complete.");
 
@@ -1782,7 +1773,7 @@ void check_store(void)
 
 
 /* Something is horribly wrong: check the store. */
-static void corrupt(struct connection *conn, const char *fmt, ...)
+void corrupt(struct connection *conn, const char *fmt, ...)
 {
 	va_list arglist;
 	char *str;

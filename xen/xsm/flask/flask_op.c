@@ -26,10 +26,10 @@
 #define _copy_from_guest copy_from_guest
 
 enum flask_bootparam_t __read_mostly flask_bootparam = FLASK_BOOTPARAM_ENFORCING;
-static void parse_flask_param(char *s);
+static int parse_flask_param(const char *s);
 custom_param("flask", parse_flask_param);
 
-bool_t __read_mostly flask_enforcing = 1;
+bool __read_mostly flask_enforcing = true;
 
 #define MAX_POLICY_SIZE 0x4000000
 
@@ -58,7 +58,7 @@ static int flask_security_make_bools(void);
 
 extern int ss_initialized;
 
-static void __init parse_flask_param(char *s)
+static int __init parse_flask_param(const char *s)
 {
     if ( !strcmp(s, "enforcing") )
         flask_bootparam = FLASK_BOOTPARAM_ENFORCING;
@@ -70,6 +70,8 @@ static void __init parse_flask_param(char *s)
         flask_bootparam = FLASK_BOOTPARAM_PERMISSIVE;
     else
         flask_bootparam = FLASK_BOOTPARAM_INVALID;
+
+    return (flask_bootparam == FLASK_BOOTPARAM_INVALID) ? -EINVAL : 0;
 }
 
 static int domain_has_security(struct domain *d, u32 perms)
@@ -453,7 +455,7 @@ static int flask_security_load(struct xen_flask_load *load)
 {
     int ret;
     void *buf = NULL;
-    bool_t is_reload = ss_initialized;
+    bool is_reload = ss_initialized;
 
     ret = domain_has_security(current->domain, SECURITY__LOAD_POLICY);
     if ( ret )

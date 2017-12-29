@@ -93,9 +93,9 @@ struct shadow_paging_mode {
                                             unsigned long new,
                                             unsigned int bytes,
                                             struct sh_emulate_ctxt *sh_ctxt);
-    bool_t        (*write_guest_entry     )(struct vcpu *v, intpte_t *p,
+    bool          (*write_guest_entry     )(struct vcpu *v, intpte_t *p,
                                             intpte_t new, mfn_t gmfn);
-    bool_t        (*cmpxchg_guest_entry   )(struct vcpu *v, intpte_t *p,
+    bool          (*cmpxchg_guest_entry   )(struct vcpu *v, intpte_t *p,
                                             intpte_t *old, intpte_t new,
                                             mfn_t gmfn);
     mfn_t         (*make_monitor_table    )(struct vcpu *v);
@@ -115,7 +115,7 @@ struct shadow_paging_mode {
 struct paging_mode {
     int           (*page_fault            )(struct vcpu *v, unsigned long va,
                                             struct cpu_user_regs *regs);
-    bool_t        (*invlpg                )(struct vcpu *v, unsigned long va);
+    bool          (*invlpg                )(struct vcpu *v, unsigned long va);
     unsigned long (*gva_to_gfn            )(struct vcpu *v,
                                             struct p2m_domain *p2m,
                                             unsigned long va,
@@ -202,8 +202,9 @@ int paging_domain_init(struct domain *d, unsigned int domcr_flags);
 /* Handler for paging-control ops: operations from user-space to enable
  * and disable ephemeral shadow modes (test mode and log-dirty mode) and
  * manipulate the log-dirty bitmap. */
-int paging_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
-                  XEN_GUEST_HANDLE_PARAM(void) u_domctl, bool_t resuming);
+int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
+                  XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl,
+                  bool_t resuming);
 
 /* Helper hypercall for dealing with continuations. */
 long paging_domctl_continuation(XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
@@ -292,11 +293,13 @@ static inline void paging_update_paging_modes(struct vcpu *v)
 }
 
 
-/* Write a new value into the guest pagetable, and update the
- * paging-assistance state appropriately.  Returns 0 if we page-faulted,
- * 1 for success. */
-static inline bool_t paging_write_guest_entry(struct vcpu *v, intpte_t *p,
-                                              intpte_t new, mfn_t gmfn)
+/*
+ * Write a new value into the guest pagetable, and update the
+ * paging-assistance state appropriately.  Returns false if we page-faulted,
+ * true for success.
+ */
+static inline bool paging_write_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn)
 {
 #ifdef CONFIG_SHADOW_PAGING
     if ( unlikely(paging_mode_shadow(v->domain)) && paging_get_hostmode(v) )
@@ -307,13 +310,14 @@ static inline bool_t paging_write_guest_entry(struct vcpu *v, intpte_t *p,
 }
 
 
-/* Cmpxchg a new value into the guest pagetable, and update the
- * paging-assistance state appropriately.  Returns 0 if we page-faulted,
- * 1 if not.  N.B. caller should check the value of "old" to see if the
- * cmpxchg itself was successful. */
-static inline bool_t paging_cmpxchg_guest_entry(struct vcpu *v, intpte_t *p,
-                                                intpte_t *old, intpte_t new,
-                                                mfn_t gmfn)
+/*
+ * Cmpxchg a new value into the guest pagetable, and update the
+ * paging-assistance state appropriately.  Returns false if we page-faulted,
+ * true if not.  N.B. caller should check the value of "old" to see if the
+ * cmpxchg itself was successful.
+ */
+static inline bool paging_cmpxchg_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t *old, intpte_t new, mfn_t gmfn)
 {
 #ifdef CONFIG_SHADOW_PAGING
     if ( unlikely(paging_mode_shadow(v->domain)) && paging_get_hostmode(v) )
@@ -368,8 +372,7 @@ static inline unsigned int paging_max_paddr_bits(const struct domain *d)
 {
     unsigned int bits = paging_mode_hap(d) ? hap_paddr_bits : paddr_bits;
 
-    if ( !IS_ENABLED(BIGMEM) && paging_mode_shadow(d) &&
-         (!is_pv_domain(d) || opt_allow_superpage) )
+    if ( !IS_ENABLED(BIGMEM) && paging_mode_shadow(d) && !is_pv_domain(d) )
     {
         /* Shadowed superpages store GFNs in 32-bit page_info fields. */
         bits = min(bits, 32U + PAGE_SHIFT);
