@@ -42,6 +42,7 @@ EARLY_PRINTK_rcar3          := scif,0xe6e88000
 EARLY_PRINTK_seattle        := pl011,0xe1010000
 EARLY_PRINTK_sun6i          := 8250,0x01c28000,2
 EARLY_PRINTK_sun7i          := 8250,0x01c28000,2
+EARLY_PRINTK_sun8i          := 8250,0x05000000,2
 EARLY_PRINTK_thunderx       := pl011,0x87e024000000
 EARLY_PRINTK_vexpress       := pl011,0x1c090000
 EARLY_PRINTK_xgene-mcdivitt := 8250,0x1c021000,2
